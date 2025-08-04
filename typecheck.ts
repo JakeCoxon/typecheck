@@ -137,7 +137,7 @@ const Result = {
 export interface Loc { file: string; line: number; col: number }
 
 const dummy: Loc = { file: "<repl>", line: 0, col: 0, 
-  [inspect.custom]: (d,o,i) => o.stylize(`<loc>`, 'special') };   // demo helper
+  [inspect.custom as any]: (d: any, o: any, i: any) => o.stylize(`<loc>`, 'special') };   // demo helper
 
 /*======================================================================*/
 /* 1.  Types, unknowns, occurs-check unification                        */
@@ -219,7 +219,7 @@ export type Type =
 const areTypesEqual = (t1: Type, t2: Type): boolean => {
   t1 = resolve(t1);
   t2 = resolve(t2);
-  const areTypeListsEqual = (l1: Type[], l2: Type[]): boolean => l1.length === l2.length && l1.every((t, i) => areTypesEqual(t, l2[i]));
+  const areTypeListsEqual = (l1: Type[], l2: Type[]): boolean => l1.length === l2.length && l1.every((t, i) => areTypesEqual(t, l2[i]!));
   if (t1 === t2) return true;
   if (t1 instanceof UnknownType && t2 instanceof UnknownType) return t1.id === t2.id;
   if (t1 instanceof TypeVariable && t2 instanceof TypeVariable) return t1.name === t2.name;
@@ -365,19 +365,19 @@ const getNextSchemeId = () => nextSchemeId++;
 
 
 class Application {
-  schemeId: number
-  nodeIdx: number
-  fn: Type
-  args: Type[]
-  typeArgs: Type[]
-  result: Type
+  schemeId!: number
+  nodeIdx!: number
+  fn!: Type
+  args!: Type[]
+  typeArgs!: Type[]
+  result!: Type
 }
 
 class Instantiation {
-  schemeId: number
-  args: Type[]
-  mono: Type
-  nodeIdx: number
+  schemeId!: number
+  args!: Type[]
+  mono!: Type
+  nodeIdx!: number
 }
 
 
@@ -398,14 +398,18 @@ export class Program {
     if (index < 0 || index >= this.nodes.length) {
       throw new Error(`Invalid node index: ${index}`);
     }
-    return this.nodes[index];
+    const node = this.nodes[index];
+    assert(node, `Node at index ${index} is undefined`);
+    return node;
   }
 
   getType(index: number): Type {
     if (index < 0 || index >= this.types.length) {
       throw new Error(`Invalid type index: ${index}`);
     }
-    return this.types[index];
+    const type = this.types[index];
+    assert(type, `Type at index ${index} is undefined`);
+    return type;
   }
 
   addNode(node: Node): number {
@@ -466,7 +470,8 @@ const primLe: Record<string, string[]> = {
   Unit : ["Unit"],
 };
 
-const primSubtype = (a: PrimitiveType, b: PrimitiveType) => a === b || primLe[a.name].includes(b.name);
+const primSubtype = (a: PrimitiveType, b: PrimitiveType): boolean => 
+  a === b || (primLe[a.name]?.includes(b.name) ?? false);
 
 const resolve = (t: Type): Type =>
   isUnknown(t) && solved.has(t.id) ? resolve(solved.get(t.id)!) : t;
@@ -506,7 +511,7 @@ const unify = Result.wrap((a: Type, b: Type, record: boolean = true) => {
   if (isArrowN(a) && isArrowN(b)) {
     assert(a.params.length === b.params.length, "cannot unify ArrowN with different numbers of parameters", { a, b })
     for (let i = 0; i < a.params.length; i++) {
-      unify(a.params[i], b.params[i], record).getOrThrow()
+      unify(a.params[i]!, b.params[i]!, record).getOrThrow()
     }
     unify(a.result, b.result, record).getOrThrow()
     return;
@@ -514,7 +519,7 @@ const unify = Result.wrap((a: Type, b: Type, record: boolean = true) => {
   if (isOverload(a) && isOverload(b)) {
     assert(a.alts.length === b.alts.length, "cannot unify overloads with different numbers of alternatives", { a, b })
     for (let i = 0; i < a.alts.length; i++) {
-      unify(a.alts[i], b.alts[i], record).getOrThrow()
+      unify(a.alts[i]!, b.alts[i]!, record).getOrThrow()
     }
     return;
   }
@@ -522,7 +527,7 @@ const unify = Result.wrap((a: Type, b: Type, record: boolean = true) => {
     assert(a.ctor === b.ctor, "cannot unify type applications with different constructors", { a, b })
     assert(a.args.length === b.args.length, "cannot unify type applications with different numbers of arguments", { a, b })
     for (let i = 0; i < a.args.length; i++) {
-      unify(a.args[i], b.args[i], record).getOrThrow()
+      unify(a.args[i]!, b.args[i]!, record).getOrThrow()
     }
     return;
   }
@@ -552,7 +557,7 @@ const subsume = Result.wrap((a: Type, b: Type, record: boolean = true) => {
   if (isArrowN(a) && isArrowN(b)) {
     assert(a.params.length === b.params.length, "cannot subsume ArrowN with different numbers of parameters", { a, b })
     for (let i = 0; i < a.params.length; i++) {
-      subsume(a.params[i], b.params[i], record).getOrThrow()
+      subsume(a.params[i]!, b.params[i]!, record).getOrThrow()
     }
     subsume(a.result, b.result, record).getOrThrow()
     return;
@@ -563,7 +568,7 @@ const subsume = Result.wrap((a: Type, b: Type, record: boolean = true) => {
     assert(a.ctor === b.ctor, "cannot subsume type applications with different constructors", { a, b })
     assert(a.args.length === b.args.length, "cannot subsume type applications with different numbers of arguments", { a, b })
     for (let i = 0; i < a.args.length; i++) {
-      subsume(a.args[i], b.args[i], record).getOrThrow()
+      subsume(a.args[i]!, b.args[i]!, record).getOrThrow()
     }
     return;
   }
@@ -634,7 +639,7 @@ function applySchemeUnknowns(state: InterpreterState, nodeIdx: number, s: Scheme
 function concreteInstantiateWithArgs(state: InterpreterState, s: Scheme, args: Type[]): Type {
   assert(args.length === s.vars.length, "arity mismatch for scheme", { s, args });
   const subst = new Map<string, Type>();
-  s.vars.forEach((v, i) => subst.set(v, args[i]));
+  s.vars.forEach((v, i) => subst.set(v, args[i]!));
   return substWalk(s.body, subst);
 }
 
@@ -759,7 +764,7 @@ function exprToProgram(expr: Expr): Program {
         const paramIndices: number[] = [];
         
         for (let i = 0; i < e.params.length; i++) {
-          const paramIndex = program.addNode(nodeFac.funParam(e.params[i], -1, e.loc));
+          const paramIndex = program.addNode(nodeFac.funParam(e.params[i]!, -1, e.loc));
           paramIndices.push(paramIndex);
         }
         
@@ -785,8 +790,8 @@ function exprToProgram(expr: Expr): Program {
 
         // Add function parameters
         for (let i = 0; i < e.params.length; i++) {
-          const typeIndex = e.paramTypes?.[i] ? program.addNode(nodeFac.var(e.paramTypes[i])) : -1;
-          const paramIndex = program.addNode(nodeFac.funParam(e.params[i], typeIndex, e.loc));
+          const typeIndex = e.paramTypes?.[i] ? program.addNode(nodeFac.var(e.paramTypes[i]!)) : -1;
+          const paramIndex = program.addNode(nodeFac.funParam(e.params[i]!, typeIndex, e.loc));
           paramIndices.push(paramIndex);
         }
         
@@ -900,7 +905,7 @@ function lineariseProgram(program: Program, nodeIdx: number, mode: "synth" | "ch
         if (nodeIdx === -1) return code.push({op:"pushType", ty:newUnknown(), loc});
         const node = program.getNode(nodeIdx);
         assert(node.kind === "Var", "Expected var node for now", { paramNode, node });
-        code.push({op:"pushType", ty:typeParams[node.name], loc:node.location});
+        code.push({op:"pushType", ty:typeParams[node.name]!, loc:node.location});
       }
       
       // Handle parameters
@@ -983,10 +988,10 @@ function lineariseProgram(program: Program, nodeIdx: number, mode: "synth" | "ch
       const n = node.statementsIndices.length;
       if (n === 0) throw new Error("empty block");
       for(let i = 0; i < n-1; i++){
-        synth(node.statementsIndices[i]);
+        synth(node.statementsIndices[i]!);
         code.push({op:"pop",loc:node.location});
       }
-      code.push(...lineariseProgram(program, node.statementsIndices[n-1], mode, expect));
+      code.push(...lineariseProgram(program, node.statementsIndices[n-1]!, mode, expect));
       code.push({op:"storeType",nodeIdx:nodeIdx,loc:node.location});
       break;
     }
@@ -1052,8 +1057,8 @@ const getOverloadMatch = (alts: ArrowNType[], argTys: Type[]): ArrowNType => {
     // Check if all arguments match exactly without implicit casts
     let subtype = false;
     for (let j = 0; j < arity; j++) {
-      if (!trySubsume(argTys[j], alt.params[j])) return;
-      if (isStrictSubtype(argTys[j], alt.params[j])) subtype = true;
+      if (!trySubsume(argTys[j]!, alt.params[j]!)) return;
+      if (isStrictSubtype(argTys[j]!, alt.params[j]!)) subtype = true;
     }
     allMatches.push(alt);
     if (!subtype) exactMatches.push(alt);
@@ -1062,8 +1067,8 @@ const getOverloadMatch = (alts: ArrowNType[], argTys: Type[]): ArrowNType => {
   // TODO: Better error messages
   assert(allMatches.length > 0, `no viable overloads for ${arity} arguments`, { arity, argTys, alts });
 
-  if (exactMatches.length === 1) return exactMatches[0];
-  if (exactMatches.length === 0 && allMatches.length === 1) return allMatches[0];
+  if (exactMatches.length === 1) return exactMatches[0]!;
+  if (exactMatches.length === 0 && allMatches.length === 1) return allMatches[0]!;
   assert(false, "ambiguous overload", { exactMatches, allMatches, argTys });
 }
 
@@ -1082,7 +1087,7 @@ const applyN = (state: InterpreterState, nodeIdx: number, arity: number, fnTy: T
   if (isOverload(fnTy)) {
     const match = getOverloadMatch(fnTy.alts, argTys);
     for (let j = 0; j < arity; j++) {
-      subsume(argTys[j], match.params[j], true).getOrThrow()
+      subsume(argTys[j]!, match.params[j]!, true).getOrThrow()
     }
     const res = resolve(match.result);
     updateApp(state, nodeIdx, -1, match, argTys, res);
@@ -1090,7 +1095,7 @@ const applyN = (state: InterpreterState, nodeIdx: number, arity: number, fnTy: T
   } else if (isArrowN(fnTy)) {
     assert(fnTy.params.length === arity, `function expects ${fnTy.params.length} arguments but got ${arity}`, { fnTy, arity });
     for (let j = 0; j < arity; j++) {
-      subsume(argTys[j], fnTy.params[j], true).getOrThrow()
+      subsume(argTys[j]!, fnTy.params[j]!, true).getOrThrow()
     }
     const res = resolve(fnTy.result);
     updateApp(state, nodeIdx, -1, fnTy, argTys, res);
@@ -1119,10 +1124,10 @@ function lookupType(state: InterpreterState, name: string, nodeIdx: number, loc:
   if (name === "Unit") return prim(UnitType);
 
   if (name === "Fn") {
-    return arrowN(args.slice(0, -1), args[args.length - 1]);
+    return arrowN(args.slice(0, -1), args[args.length - 1]!);
   }
     
-  const e = state.envStk[state.envStk.length-1].get(name);
+  const e = state.envStk[state.envStk.length-1]?.get(name);
   assert(e, `type '${name}' not found`);
   assert(e.type, `type '${name}' not found`);
 
@@ -1146,7 +1151,7 @@ function lookupType(state: InterpreterState, name: string, nodeIdx: number, loc:
 function runInternal(state: InterpreterState): RunResult {
   const { code, typeStk, expectStk, envStk } = state;
 
-  const env = () => envStk[envStk.length-1];
+  const env = () => envStk[envStk.length-1]!;
   const envSetVal = (name: string, type: Type | Scheme) => env().set(name, { value: { tag:"KnownV", schemeOrType: type } });
 
   const popN = (n: number): Type[] => {
@@ -1156,7 +1161,7 @@ function runInternal(state: InterpreterState): RunResult {
   };
 
   for (; state.pc < code.length; state.pc++) {
-    const i = state.instr = code[state.pc];
+    const i = state.instr = code[state.pc]!;
     // console.log("i =", compactInspect(i));
     switch(i.op) {
 
@@ -1251,10 +1256,10 @@ function runInternal(state: InterpreterState): RunResult {
         break;
       }
 
-      case "pushExpectFromStack": expectStk.push(typeStk[typeStk.length-1]); break;
+      case "pushExpectFromStack": expectStk.push(typeStk[typeStk.length-1]!); break;
       case "pushExpect": expectStk.push(i.ty); break;
       case "popExpect":
-        const got = typeStk[typeStk.length-1];
+        const got = typeStk[typeStk.length-1]!;
         const expect = expectStk.pop()!;
         const result = subsume(got, expect, false);
         assert(result.ok, result.errorOrNull?.message ?? '', { result, got, expect });
@@ -1289,7 +1294,7 @@ function runInternal(state: InterpreterState): RunResult {
     console.log("typeStk =", typeStk.map(show).join(", "));
     throw new Error("ill-typed program");
   }
-  const res = resolve(typeStk[0]);
+  const res = resolve(typeStk[0]!);
   console.log("type =", show(res));
   return res;
 }

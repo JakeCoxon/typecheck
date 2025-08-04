@@ -933,6 +933,12 @@ describe("Generic Functions in Programs", () => {
   // });
 });
 
+declare module "bun:test" {
+  interface Matchers<T=unknown> {
+    toEqualType(expected: Type): T;
+  }
+}
+
 expect.extend({
   toEqualType(received: Type, expected: Type) {
     return {  
@@ -940,7 +946,7 @@ expect.extend({
       message: () => `expected ${received} to be ${expected}`,
     };
   },
-});
+} as any);
 
 describe("Type Annotation Resolution for Generic Structs", () => {
   it("should resolve simple non-generic struct annotations", () => {
@@ -1383,7 +1389,7 @@ describe("storeType Tests", () => {
     
     // Check that types were stored for all nodes
     for (let i = 0; i < program.nodes.length; i++) {
-      const node = program.nodes[i];
+      const node = program.nodes[i]!
       if (node.kind === "IntLiteral") {
         expect(program.types[i]).toBe(IntType);
       } else if (node.kind === "App") {
@@ -1524,7 +1530,7 @@ describe("storeType Tests", () => {
     
     // Verify that all nodes that should have types stored actually have them
     for (let i = 0; i < program.nodes.length; i++) {
-      const node = program.nodes[i];
+      const node = program.nodes[i]!;
       if (node.kind === "IntLiteral" || node.kind === "BoolLiteral" || 
           node.kind === "Var" || node.kind === "App" || node.kind === "If") {
         expect(program.types[i]).toBeDefined();
@@ -1581,7 +1587,7 @@ describe("storeType Tests", () => {
     
     // Verify that all application nodes have their types stored
     for (let i = 0; i < program.nodes.length; i++) {
-      const node = program.nodes[i];
+      const node = program.nodes[i]!;
       if (node.kind === "App") {
         expect(program.types[i]).toBeDefined();
       }
@@ -1616,7 +1622,7 @@ describe("storeType Tests", () => {
     
     // Verify that all arithmetic operation nodes have their types stored
     for (let i = 0; i < program.nodes.length; i++) {
-      const node = program.nodes[i];
+      const node = program.nodes[i]!;
       if (node.kind === "App") {
         expect(program.types[i]).toBeDefined();
         // Note: Not all App nodes will have IntType - some will have function types
@@ -1654,7 +1660,7 @@ describe("storeType Tests", () => {
     // Verify that types are stored correctly for each operation
     const expectedTypes = new Map<number, Type>();
     for (let i = 0; i < program.nodes.length; i++) {
-      const node = program.nodes[i];
+      const node = program.nodes[i]!;
       if (node.kind === "IntLiteral") {
         expectedTypes.set(i, IntType);
       } else if (node.kind === "App") {
@@ -1696,8 +1702,8 @@ describe("storeType Tests", () => {
 
     const inst = program.instantiations.filter(x => x.schemeId === idScheme.id)
     expect(inst).toHaveLength(1);
-    expect(inst[0].mono).toEqualType(tapp(idScheme, [IntType])); // TODO: A bit confused when to use tapp or arrow
-    expect(inst[0].args[0]).toEqualType(IntType);
+    expect(inst[0]!.mono).toEqualType(tapp(idScheme, [IntType])); // TODO: A bit confused when to use tapp or arrow
+    expect(inst[0]!.args[0]).toEqualType(IntType);
     
   });
 
