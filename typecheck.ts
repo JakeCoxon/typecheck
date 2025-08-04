@@ -701,6 +701,7 @@ type Instr =
   | { op:"enterScope"  ; loc:Loc }
   | { op:"exitScope"   ; loc:Loc }
   | { op:"bindConstant"; name:string; ty:Type        ; loc:Loc }
+  | { op:"bindType"    ; name:string; ty:Type        ; loc:Loc }
   | { op:"bindScheme"  ; name:string; scheme:Scheme; nodeIdx:number; loc:Loc }
   | { op:"bind"        ; name:string       ; loc:Loc }
   | { op:"makeArrowN"  ; params:number     ; loc:Loc }
@@ -837,6 +838,28 @@ function exprToProgram(expr: Expr): Program {
 /* 4.  Lineariser                                                       */
 /*======================================================================*/
 
+// Unified lineariseType function that handles both type parameters and type annotations
+const lineariseType = (program: Program, code: Instr[], nodeIdx: number, loc: Loc) => {
+  if (nodeIdx === -1) return code.push({op:"pushType", ty:newUnknown(), loc});
+  
+  const node = program.getNode(nodeIdx);
+  
+  if (node.kind === "Var") {
+    code.push({op:"resolveTypeAnnotation",annotation:node.name,nodeIdx,loc:node.location});
+    code.push({op:"storeType",nodeIdx:nodeIdx,loc:node.location});
+  } else if (node.kind === "TypeApp") {
+    node.typeArgsIndices.forEach(argIndex => {
+      lineariseType(program, code, argIndex, node.location);
+    });
+    const baseNode = program.getNode(node.baseIndex);
+    assert(baseNode.kind === "Var", "Expected var node for now", { baseNode });
+    code.push({op:"applyT",name:baseNode.name,nodeIdx,arity:node.typeArgsIndices.length,loc:node.location});
+    code.push({op:"storeType",nodeIdx:nodeIdx,loc:node.location});
+  } else {
+    assert(false, "Unexpected node kind for lineariseType", { node });
+  }
+};
+
 // Modified lineariser to work with Program
 function lineariseProgram(program: Program, nodeIdx: number, mode: "synth" | "check" = "synth", expect?: Type): Instr[] {
   const code: Instr[] = [];
@@ -899,21 +922,19 @@ function lineariseProgram(program: Program, nodeIdx: number, mode: "synth" | "ch
           typeParams[typeParamNode.name] = tvar(typeParamNode.name);
           scheme_.vars.push(typeParamNode.name);
         }
+        
+        // Add type parameters to the scope so they can be looked up
+        for (const [name, type] of Object.entries(typeParams)) {
+          code.push({op:"bindType", name, ty: type, loc: node.location});
+        }
       }
 
-      const lineariseType = (paramNode: Node, nodeIdx: number, loc: Loc) => {
-        if (nodeIdx === -1) return code.push({op:"pushType", ty:newUnknown(), loc});
-        const node = program.getNode(nodeIdx);
-        assert(node.kind === "Var", "Expected var node for now", { paramNode, node });
-        code.push({op:"pushType", ty:typeParams[node.name]!, loc:node.location});
-      }
-      
       // Handle parameters
       for (const paramIndex of node.paramsIndices) {
         const paramNode = program.getNode(paramIndex);
         if (paramNode.kind === "FunParam") {
           // For now, assume unannotated parameters get unknown types
-          lineariseType(paramNode, paramNode.typeIndex, paramNode.location)
+          lineariseType(program, code, paramNode.typeIndex, paramNode.location);
           code.push({op:"bind",name:paramNode.name,loc:node.location});
         }
       }
@@ -951,26 +972,7 @@ function lineariseProgram(program: Program, nodeIdx: number, mode: "synth" | "ch
         // Convert annotation type index to type using instruction
         const typeNode = program.getNode(node.typeIndex);
 
-        const lineariseType = (paramNode: Node, nodeIdx: number, loc: Loc) => {
-          if (nodeIdx === -1) return code.push({op:"pushType",ty:newUnknown(),loc});
-          const node = program.getNode(nodeIdx);
-          if (node.kind === "Var") {
-            code.push({op:"resolveTypeAnnotation",annotation:node.name,nodeIdx,loc:node.location});
-            code.push({op:"storeType",nodeIdx:nodeIdx,loc:node.location});
-          } else if (node.kind === "TypeApp") {
-            node.typeArgsIndices.forEach(argIndex => {
-              lineariseType(node, argIndex, node.location);
-            });
-            const baseNode = program.getNode(node.baseIndex);
-            assert(baseNode.kind === "Var", "Expected var node for now", { baseNode });
-            code.push({op:"applyT",name:baseNode.name,nodeIdx,arity:node.typeArgsIndices.length,loc:node.location});
-            code.push({op:"storeType",nodeIdx:nodeIdx,loc:node.location});
-          } else {
-            assert(false, "Expected var node for now", { node });
-          }
-        }
-
-        lineariseType(typeNode, node.typeIndex, typeNode.location);
+        lineariseType(program, code, node.typeIndex, typeNode.location);
         // code.push({op:"resolveTypeAnnotation", annotation:typeNode.name, loc:node.location});
 
         if (node.valueIndex !== -1) {
@@ -1153,6 +1155,7 @@ function runInternal(state: InterpreterState): RunResult {
 
   const env = () => envStk[envStk.length-1]!;
   const envSetVal = (name: string, type: Type | Scheme) => env().set(name, { value: { tag:"KnownV", schemeOrType: type } });
+  const envSetType = (name: string, type: Type | Scheme) => env().set(name, { type: { tag:"KnownT", schemeOrType: type } });
 
   const popN = (n: number): Type[] => {
     assert(n > 0, "popN: n must be positive");
@@ -1191,6 +1194,7 @@ function runInternal(state: InterpreterState): RunResult {
       case "exitScope":  envStk.pop(); break;
 
       case "bindConstant": envSetVal(i.name, i.ty); break;
+      case "bindType": envSetType(i.name, i.ty); break;
       case "bindScheme": {
         // Update the body and bind it
         const result = typeStk.pop()!;
@@ -1323,6 +1327,7 @@ export {
   block,
   exprToProgram,
   lineariseProgram,
+  lineariseType,
   runInternal,
   createInterpreterState,
   startTrial,
