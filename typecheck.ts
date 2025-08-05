@@ -599,29 +599,6 @@ function bindUnknown(u: UnknownType, t: Type, record: boolean = true) {
   solved.set(u.id, t);
 }
 
-// Substitution function for type variables
-function substWalk(t: Type, subst: Map<string, Type>): Type {
-  if (isTVar(t)) {
-    const replacement = subst.get(t.name);
-    return replacement ? replacement : t;
-  }
-  if (isArrowN(t)) {
-    return arrowN(t.params.map(p => substWalk(p, subst)), substWalk(t.result, subst));
-  }
-  if (isOverload(t)) {
-    return overload(t.alts.map(alt => {
-      return arrowN(alt.params.map(p => substWalk(p, subst)), substWalk(alt.result, subst));
-    }));
-  }
-  // if (isTApp(t)) {
-  //   return tapp(t.ctor, t.args.map(arg => substWalk(arg, subst)));
-  // }
-  // if (isStructType(t)) {
-  //   return tapp(t.name, t.fields.map(f => substWalk(f.type, subst)));
-  // }
-  assert(false, "unexpected type", { t });
-  return t;
-}
 
 function appliedSchemeOrType(state: InterpreterState, nodeIdx: number, t: Type | Scheme): Type {
   if (isScheme(t)) return applySchemeUnknowns(state, nodeIdx, t);
@@ -633,6 +610,7 @@ function applySchemeUnknowns(state: InterpreterState, nodeIdx: number, s: Scheme
   const actualArgs = s.vars.map(v => newUnknown());
   const t = tapp(s, actualArgs);
   state.program?.instantiations.push({ schemeId: s.id, args: actualArgs, mono: t, nodeIdx });
+  state.program?.schemes.set(s.id, s);
   return t;
 }
 
@@ -640,6 +618,34 @@ function concreteInstantiateWithArgs(state: InterpreterState, s: Scheme, args: T
   assert(args.length === s.vars.length, "arity mismatch for scheme", { s, args });
   const subst = new Map<string, Type>();
   s.vars.forEach((v, i) => subst.set(v, args[i]!));
+
+  // Substitution function for type variables
+  function substWalk(t: Type, subst: Map<string, Type>): Type {
+    if (isTVar(t)) {
+      const replacement = subst.get(t.name);
+      return replacement ? replacement : t;
+    }
+    if (isArrowN(t)) {
+      return arrowN(t.params.map(p => substWalk(p, subst)), substWalk(t.result, subst));
+    }
+    if (isOverload(t)) {
+      return overload(t.alts.map(alt => {
+        return arrowN(alt.params.map(p => substWalk(p, subst)), substWalk(alt.result, subst));
+      }));
+    }
+    if (isTApp(t)) {
+      const scheme = state.program?.schemes.get(t.schemeId);
+      assert(scheme, "scheme not found", { t });
+      return tapp(scheme, t.args.map(arg => substWalk(arg, subst)));
+    }
+
+    // A bare struct type will have no substitutions
+    if (isStructType(t)) return t
+
+    assert(false, "unexpected type", { t, s });
+    return t;
+  }
+
   return substWalk(s.body, subst);
 }
 
@@ -647,6 +653,7 @@ function instantiateWithArgs(state: InterpreterState, nodeIdx: number, s: Scheme
   assert(args.length === s.vars.length, "arity mismatch for scheme", { s, args });
   const t = tapp(s, args);
   state.program?.instantiations.push({ schemeId: s.id, args, mono: t, nodeIdx });
+  state.program?.schemes.set(s.id, s);
   return t;
 }
 

@@ -470,16 +470,6 @@ describe("Multi-Argument Functions", () => {
   });
 });
 
-const insertSchemes = (program: Program, env: Env) => {
-  env.forEach((entry, name) => {
-    if (entry.value?.tag === "KnownV" && isScheme(entry.value.schemeOrType)) {
-      program.schemes.set(entry.value.schemeOrType.id, entry.value.schemeOrType);
-    } else if (entry.type?.tag === "KnownT" && isScheme(entry.type.schemeOrType)) {
-      program.schemes.set(entry.type.schemeOrType.id, entry.type.schemeOrType);
-    }
-  });
-}
-
 describe("Generic Type System", () => {
   it("should handle generic identity function with Int", () => {
     const env: Env = new Map();
@@ -491,7 +481,6 @@ describe("Generic Type System", () => {
     // Test with Int
     const prog1 = app(v("id"), int(42));
     const program1 = exprToProgram(prog1);
-    insertSchemes(program1, env);
     const bytecode1 = lineariseProgram(program1, program1.rootIndex);
     const result1 = runExpectingResult(bytecode1, env, program1);
     expect(result1).toBe(IntType);
@@ -507,7 +496,6 @@ describe("Generic Type System", () => {
     // Test with Bool
     const prog2 = app(v("id"), bool(true));
     const program2 = exprToProgram(prog2);
-    insertSchemes(program2, env);
     const bytecode2 = lineariseProgram(program2, program2.rootIndex);
     const result2 = runExpectingResult(bytecode2, env, program2);
     expect(result2).toBe(BoolType);
@@ -1054,7 +1042,6 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     const prog = _let("complex", typeApp(v("Map"), [typeApp(v("List"), [v("Int")]), typeApp(v("Option"), [v("Bool")])]), null);
     const program = exprToProgram(prog);
     const bytecode = lineariseProgram(program, program.rootIndex);
-    insertSchemes(program, env);
     const result = runExpectingResult(bytecode, env, program);
     expect(result).toEqualType(complexType);
   });
@@ -1683,14 +1670,11 @@ describe("storeType Tests", () => {
     // Create: id(42)
     const prog = app(v("id"), int(42));
     const program = exprToProgram(prog);
-    insertSchemes(program, env);
     const bytecode = lineariseProgram(program, program.rootIndex);
     
     const result = runExpectingResult(bytecode, env, program);
     expect(result).toEqualType(IntType);
     expect(program.types[program.rootIndex]).toEqualType(IntType);
-
-
 
     // Check application 
     const app_ = program.apps.get(program.rootIndex)!
@@ -1704,6 +1688,7 @@ describe("storeType Tests", () => {
     expect(inst).toHaveLength(1);
     expect(inst[0]!.mono).toEqualType(tapp(idScheme, [IntType])); // TODO: A bit confused when to use tapp or arrow
     expect(inst[0]!.args[0]).toEqualType(IntType);
+    expect(program.schemes.get(idScheme.id)).toEqual(idScheme);
     
   });
 
@@ -1717,7 +1702,10 @@ describe("storeType Tests", () => {
     
     // Create: map(List<Int>, fn)
     // TODO: This shouldn't be allowed
-    const prog = v("map");
+    const prog = block(
+      _let("list", typeApp(v("List"), [v("Int")]), null),
+      app(v("map"), v("list"))
+    );
     const program = exprToProgram(prog);
     const bytecode = lineariseProgram(program, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program);
@@ -1725,5 +1713,8 @@ describe("storeType Tests", () => {
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBeDefined();
     expect(result).toBeDefined();
+
+    expect(program.schemes.get(listScheme.id)).toEqual(listScheme);
+    expect(program.schemes.get(mapScheme.id)).toEqual(mapScheme);
   });
 });
