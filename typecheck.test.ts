@@ -1,19 +1,28 @@
 import { inspect } from "bun";
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach } from "bun:test";
 import {
   type Instr, type Env, type Program, type Type, type Scheme, type UnknownType, type SuspendMissing,
   assert, isType, isScheme, newUnknown, arrow, arrowN,
   int, bool, v, lam, lamN, app, appN, _if, _let, block,
   exprToProgram, lineariseProgram, runInternal, createInterpreterState,
   startTrial, rollback, commit, unify, subsume, show,
-  trail, solved, tvar, tapp, tstruct, overload, scheme, dummy, getNextSchemeId,
+  tvar, tapp, tstruct, overload, scheme, dummy, getNextSchemeId,
   isArrowN, compactInspect, funDecl, typeApp, areTypesEqual,
-  IntType, BoolType, UnitType, FloatType
+  IntType, BoolType, UnitType, FloatType,
+  registerTrait,
+  registerTraitImpl,
+  createBounds,
+  hasTrait,
+  requireTraitNow,
+  dischargeDeferredObligations,
+  emitObligationsForInstantiation,
+  ProgramBuilder
 } from "./typecheck";
 
 /** Run for tests until result is found */
-function runExpectingResult(code: Instr[], initialEnv: Env, program?: Program): Type {
-  const result = runInternal(createInterpreterState(code, initialEnv, program));
+function runExpectingResult(code: Instr[], initialEnv: Env, program: Program, builder?: ProgramBuilder): Type {
+  const actualBuilder = builder || new ProgramBuilder();
+  const result = runInternal(createInterpreterState(code, initialEnv, actualBuilder, program));
   assert(isType(result), "Expected result, but got suspend", { result });
   const inst = program!.instantiations.map(i => ({ ...i, scheme: program!.schemes.get(i.schemeId)! }));
   console.log('program.instantiations', inst);
@@ -23,12 +32,13 @@ function runExpectingResult(code: Instr[], initialEnv: Env, program?: Program): 
 
 describe("Basic Type Checking", () => {
   it("should type check identity function applied to Int", () => {
+    const builder = new ProgramBuilder();
     const id   = lam("x", v("x"));                    // λx. x   (no annotation)
     const prog = app(id, int(42));                    // (λx. x) 42
 
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, new Map(), program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, new Map(), program, builder);
     expect(result).toBe(IntType);
   });
 });
@@ -50,9 +60,10 @@ describe("Sequence Examples", () => {
       v("y")                                          // y : Int
     );
 
-    const program1 = exprToProgram(seqProg1);
-    const seqBytecode1 = lineariseProgram(program1, program1.rootIndex);
-    const result1 = runExpectingResult(seqBytecode1, env, program1);
+    const builder = new ProgramBuilder();
+    const program1 = exprToProgram(seqProg1, builder);
+    const seqBytecode1 = lineariseProgram(builder, program1.rootIndex);
+    const result1 = runExpectingResult(seqBytecode1, env, program1, builder);
     expect(result1).toBe(IntType);
   });
 
@@ -68,9 +79,10 @@ describe("Sequence Examples", () => {
       v("result")                               // result : Int
     );
 
-    const program2 = exprToProgram(seqProg2);
-    const seqBytecode2 = lineariseProgram(program2, program2.rootIndex);
-    const result2 = runExpectingResult(seqBytecode2, env, program2);
+    const builder = new ProgramBuilder();
+    const program2 = exprToProgram(seqProg2, builder);
+    const seqBytecode2 = lineariseProgram(builder, program2.rootIndex);
+    const result2 = runExpectingResult(seqBytecode2, env, program2, builder);
     expect(result2).toBe(IntType);
   });
 
@@ -84,9 +96,10 @@ describe("Sequence Examples", () => {
       bool(true)                                      // true : Bool
     );
 
-    const program3 = exprToProgram(seqProg3);
-    const seqBytecode3 = lineariseProgram(program3, program3.rootIndex);
-    const result3 = runExpectingResult(seqBytecode3, env, program3);
+    const builder = new ProgramBuilder();
+    const program3 = exprToProgram(seqProg3, builder);
+    const seqBytecode3 = lineariseProgram(builder, program3.rootIndex);
+    const result3 = runExpectingResult(seqBytecode3, env, program3, builder);
     expect(result3).toBe(BoolType);
   });
 
@@ -110,9 +123,10 @@ describe("Sequence Examples", () => {
       v("final")                                 // final : Int
     );
 
-    const program4 = exprToProgram(seqProg4);
-    const seqBytecode4 = lineariseProgram(program4, program4.rootIndex);
-    const result4 = runExpectingResult(seqBytecode4, env, program4);
+    const builder = new ProgramBuilder();
+    const program4 = exprToProgram(seqProg4, builder);
+    const seqBytecode4 = lineariseProgram(builder, program4.rootIndex);
+    const result4 = runExpectingResult(seqBytecode4, env, program4, builder);
     expect(result4).toBe(IntType);
   });
 
@@ -125,9 +139,10 @@ describe("Sequence Examples", () => {
       int(42)                                       //   42 : Int
     );
 
-    const program5 = exprToProgram(seqProg5);
-    const seqBytecode5 = lineariseProgram(program5, program5.rootIndex);
-    const result5 = runExpectingResult(seqBytecode5, env, program5);
+    const builder = new ProgramBuilder();
+    const program5 = exprToProgram(seqProg5, builder);
+    const seqBytecode5 = lineariseProgram(builder, program5.rootIndex);
+    const result5 = runExpectingResult(seqBytecode5, env, program5, builder);
     expect(result5).toBe(IntType);
   });
 
@@ -139,9 +154,10 @@ describe("Sequence Examples", () => {
       bool(true)                                      // true : Bool
     );
 
-    const program6 = exprToProgram(seqProg6);
-    const seqBytecode6 = lineariseProgram(program6, program6.rootIndex);
-    const result6 = runExpectingResult(seqBytecode6, env, program6);
+    const builder = new ProgramBuilder();
+    const program6 = exprToProgram(seqProg6, builder);
+    const seqBytecode6 = lineariseProgram(builder, program6.rootIndex);
+    const result6 = runExpectingResult(seqBytecode6, env, program6, builder);
     expect(result6).toBe(BoolType);
   });
 });
@@ -152,131 +168,135 @@ describe("Trial/Rollback System", () => {
     // nextU = 1; // TODO: Fix this assignment
     
     // Demonstrate the trial/rollback system
+    const builder = new ProgramBuilder();
     const env2: Env = new Map();
     envSetVal(env2, "f", arrow(IntType, BoolType));
 
     // Create some unknown types
-    const u1: UnknownType = newUnknown();
-    const u2: UnknownType = newUnknown();
+    const u1: UnknownType = newUnknown(builder);
+    const u2: UnknownType = newUnknown(builder);
 
-    expect(show(u1)).toBe("?1");
-    expect(show(u2)).toBe("?2");
+    expect(show(u1, builder)).toBe("?0");
+    expect(show(u2, builder)).toBe("?1");
 
     // Start a trial
-    const mark = startTrial();
+    const mark = startTrial(builder);
 
     // Try to unify u1 with Int
-    unify(u1, IntType, true).getOrThrow();
-    expect(show(u1)).toBe("Int");
+    unify(u1, IntType, true, builder).getOrThrow();
+    expect(show(u1, builder)).toBe("Int");
     
     // Try to unify u2 with Bool
-    unify(u2, BoolType, true).getOrThrow();
-    expect(show(u2)).toBe("Bool");
+    unify(u2, BoolType, true, builder).getOrThrow();
+    expect(show(u2, builder)).toBe("Bool");
     
     // Try something that should fail
-    const error = unify(u1, BoolType, true).expectError();
+    const error = unify(u1, BoolType, true, builder).expectError();
     expect(error).toBeDefined();
     
     // Rollback to the mark
-    rollback(mark);
-    expect(show(u1)).toBe("?1");
-    expect(show(u2)).toBe("?2");
+    rollback(mark, builder);
+    expect(show(u1, builder)).toBe("?0");
+    expect(show(u2, builder)).toBe("?1");
 
     // Start another trial
-    const mark2 = startTrial();
+    const mark2 = startTrial(builder);
 
     // Try a successful unification
-    unify(u1, IntType, true).getOrThrow();
-    unify(u2, BoolType, true).getOrThrow();
-    expect(show(u1)).toBe("Int");
-    expect(show(u2)).toBe("Bool");
+    unify(u1, IntType, true, builder).getOrThrow();
+    unify(u2, BoolType, true, builder).getOrThrow();
+    expect(show(u1, builder)).toBe("Int");
+    expect(show(u2, builder)).toBe("Bool");
 
     // Commit the changes
-    commit(mark2);
-    expect(show(u1)).toBe("Int");
-    expect(show(u2)).toBe("Bool");
+    commit(mark2, builder);
+    expect(show(u1, builder)).toBe("Int");
+    expect(show(u2, builder)).toBe("Bool");
   });
 });
 
 describe("Simple Trial/Rollback", () => {
+
   it("should handle simple trial/rollback operations", () => {
-    // Reset the unknown counter for this test
-    // nextU = 3; // TODO: Fix this assignment
+    // Create a builder for isolated state
+    const builder = new ProgramBuilder();
     
-    // Clear the trail and solved map for a clean test
-    trail.length = 0;
-    solved.clear();
+    // Create fresh unknowns using the builder
+    const u3: UnknownType = newUnknown(builder);
+    const u4: UnknownType = newUnknown(builder);
 
-    // Create fresh unknowns
-    const u3: UnknownType = newUnknown();
-    const u4: UnknownType = newUnknown();
-
-    expect(show(u3)).toBe("?3");
-    expect(show(u4)).toBe("?4");
+    expect(show(u3, builder)).toBe("?0");
+    expect(show(u4, builder)).toBe("?1");
 
     // Test 1: Successful trial
-    const mark3 = startTrial();
-    unify(u3, IntType, true).getOrThrow();
-    unify(u4, BoolType, true).getOrThrow();
-    expect(show(u3)).toBe("Int");
-    expect(show(u4)).toBe("Bool");
-    expect(trail.length).toBeGreaterThanOrEqual(2);
+    const mark3 = startTrial(builder);
+    unify(u3, IntType, true, builder).getOrThrow();
+    unify(u4, BoolType, true, builder).getOrThrow();
+    expect(show(u3, builder)).toBe("Int");
+    expect(show(u4, builder)).toBe("Bool");
+    expect(builder.trail.length).toBeGreaterThanOrEqual(2);
 
     // Test 2: Failed trial with rollback
-    const mark4 = startTrial();
-    unify(u3, IntType, true).getOrThrow();    // This should work (u3 is already Int)
-    const error = unify(u4, IntType, true).expectError();    // This should fail (Bool ≠ Int)
+    const mark4 = startTrial(builder);
+    unify(u3, IntType, true, builder).getOrThrow();    // This should work (u3 is already Int)
+    const error = unify(u4, IntType, true, builder).expectError();    // This should fail (Bool ≠ Int)
     expect(error).toBeDefined();
-    rollback(mark4);
-    expect(show(u3)).toBe("Int");
-    expect(show(u4)).toBe("Bool");
+    rollback(mark4, builder);
+    expect(show(u3, builder)).toBe("Int");
+    expect(show(u4, builder)).toBe("Bool");
 
     // Test 3: Commit successful trial
-    const mark5 = startTrial();
-    unify(u3, IntType, true).getOrThrow();    // This should work (u3 is already Int)
-    commit(mark5);
-    expect(show(u3)).toBe("Int");
-    expect(show(u4)).toBe("Bool");
+    const mark5 = startTrial(builder);
+    unify(u3, IntType, true, builder).getOrThrow();    // This should work (u3 is already Int)
+    commit(mark5, builder);
+    expect(show(u3, builder)).toBe("Int");
+    expect(show(u4, builder)).toBe("Bool");
   });
 });
 
 describe("Non-recording Operations", () => {
   it("should handle non-recording operations correctly", () => {
-    const u5: UnknownType = newUnknown();
-    expect(show(u5)).toBe("?5");
+    // Create a builder for isolated state
+    const builder = new ProgramBuilder();
+    
+    const u5: UnknownType = newUnknown(builder);
+    expect(show(u5, builder)).toBe("?0");
 
     // This should not be recorded
-    unify(u5, IntType, false).getOrThrow();
-    expect(show(u5)).toBe("Int");
-    expect(trail.length).toBe(2);
+    unify(u5, IntType, false, builder).getOrThrow();
+    expect(show(u5, builder)).toBe("Int");
+    expect(builder.trail.length).toBe(0); // Not recorded
 
     // This should be recorded
-    const mark6 = startTrial();
-    unify(u5, IntType, true).getOrThrow();  // This should work since u5 is already Int
-    rollback(mark6);
-    expect(show(u5)).toBe("Int");
+    const mark6 = startTrial(builder);
+    unify(u5, IntType, true, builder).getOrThrow();  // This should work since u5 is already Int
+    rollback(mark6, builder);
+    expect(show(u5, builder)).toBe("Int");
   });
 });
 
 describe("Apply/Join Non-recording", () => {
   it("should handle apply/join non-recording operations", () => {
-    const u6: UnknownType = newUnknown();
-    const u7: UnknownType = newUnknown();
+    // Create a builder for isolated state
+    const builder = new ProgramBuilder();
+    
+    const u6: UnknownType = newUnknown(builder);
+    const u7: UnknownType = newUnknown(builder);
 
-    expect(show(u6)).toBe("?6");
-    expect(show(u7)).toBe("?7");
+    expect(show(u6, builder)).toBe("?0");
+    expect(show(u7, builder)).toBe("?1");
 
     // Simulate an apply operation (function application)
     const fnType = { kind: "Arrow" as const, param: u6, result: u7 };
-    unify(fnType.param, IntType, false).getOrThrow();  // This simulates apply behavior
-    expect(show(u6)).toBe("Int");
+    unify(fnType.param, IntType, false, builder).getOrThrow();  // This simulates apply behavior
+    expect(show(u6, builder)).toBe("Int");
 
     // Start a trial and try to change u6
-    const mark7 = startTrial();
-    const error = unify(u6, BoolType, true).expectError();  // This should fail since u6 is already Int
+    const mark7 = startTrial(builder);
+    const error = unify(u6, BoolType, true, builder).expectError();  // This should fail since u6 is already Int
     expect(error).toBeDefined();
-    rollback(mark7);
-    expect(show(u6)).toBe("Int");
+    rollback(mark7, builder);
+    expect(show(u6, builder)).toBe("Int");
   });
 });
 
@@ -293,9 +313,10 @@ describe("Overload Functionality", () => {
     envSetVal(env, "add", overloadedFn);
 
     const prog1 = app(v("add"), int(42));
-    const program1 = exprToProgram(prog1);
-    const bytecode1 = lineariseProgram(program1, program1.rootIndex);
-    const result1 = runExpectingResult(bytecode1, env, program1);
+    const builder = new ProgramBuilder();
+    const program1 = exprToProgram(prog1, builder);
+    const bytecode1 = lineariseProgram(builder, program1.rootIndex);
+    const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toBe(IntType);
   });
 
@@ -309,9 +330,10 @@ describe("Overload Functionality", () => {
     envSetVal(env, "add", overloadedFn);
 
     const prog2 = app(v("add"), int(42)); // This should work due to Int ≤ Float
-    const program2 = exprToProgram(prog2);
-    const bytecode2 = lineariseProgram(program2, program2.rootIndex);
-    const result2 = runExpectingResult(bytecode2, env, program2);
+    const builder = new ProgramBuilder();
+    const program2 = exprToProgram(prog2, builder);
+    const bytecode2 = lineariseProgram(builder, program2.rootIndex);
+    const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toBe(IntType);
   });
 
@@ -325,9 +347,10 @@ describe("Overload Functionality", () => {
     envSetVal(env, "func", moreSpecificOverload);
     
     const prog3 = app(v("func"), bool(true));
-    const program3 = exprToProgram(prog3);
-    const bytecode3 = lineariseProgram(program3, program3.rootIndex);
-    const result3 = runExpectingResult(bytecode3, env, program3);
+    const builder = new ProgramBuilder();
+    const program3 = exprToProgram(prog3, builder);
+    const bytecode3 = lineariseProgram(builder, program3.rootIndex);
+    const result3 = runExpectingResult(bytecode3, env, program3, builder);
     expect(result3).toBe(BoolType);
   });
 
@@ -341,11 +364,12 @@ describe("Overload Functionality", () => {
     envSetVal(env, "add", overloadedFn);
 
     const prog4 = app(v("add"), bool(true));
-    const program4 = exprToProgram(prog4);
-    const bytecode4 = lineariseProgram(program4, program4.rootIndex);
+    const builder = new ProgramBuilder();
+    const program4 = exprToProgram(prog4, builder);
+    const bytecode4 = lineariseProgram(builder, program4.rootIndex);
     
     expect(() => {
-      runExpectingResult(bytecode4, env, program4);
+      runExpectingResult(bytecode4, env, program4, builder);
     }).toThrow("no viable overloads");
   });
 
@@ -358,11 +382,12 @@ describe("Overload Functionality", () => {
     envSetVal(env, "ambiguous", ambiguousOverload);
     
     const prog7 = app(v("ambiguous"), int(42));
-    const program7 = exprToProgram(prog7);
-    const bytecode7 = lineariseProgram(program7, program7.rootIndex);
+    const builder = new ProgramBuilder();
+    const program7 = exprToProgram(prog7, builder);
+    const bytecode7 = lineariseProgram(builder, program7.rootIndex);
     
     expect(() => {
-      runExpectingResult(bytecode7, env, program7);
+      runExpectingResult(bytecode7, env, program7, builder);
     }).toThrow("ambiguous overload");
   });
 
@@ -375,9 +400,10 @@ describe("Overload Functionality", () => {
     envSetVal(env, "exactVsCast", exactVsCastOverload);
     
     const prog8 = app(v("exactVsCast"), int(42));
-    const program8 = exprToProgram(prog8);
-    const bytecode8 = lineariseProgram(program8, program8.rootIndex);
-    const result8 = runExpectingResult(bytecode8, env, program8);
+    const builder = new ProgramBuilder();
+    const program8 = exprToProgram(prog8, builder);
+    const bytecode8 = lineariseProgram(builder, program8.rootIndex);
+    const result8 = runExpectingResult(bytecode8, env, program8, builder);
     expect(result8).toBe(IntType);
   });
 
@@ -389,9 +415,10 @@ describe("Overload Functionality", () => {
     envSetVal(env, "onlyCast", onlyCastOverload);
     
     const prog9 = app(v("onlyCast"), int(42));
-    const program9 = exprToProgram(prog9);
-    const bytecode9 = lineariseProgram(program9, program9.rootIndex);
-    const result9 = runExpectingResult(bytecode9, env, program9);
+    const builder = new ProgramBuilder();
+    const program9 = exprToProgram(prog9, builder);
+    const bytecode9 = lineariseProgram(builder, program9.rootIndex);
+    const result9 = runExpectingResult(bytecode9, env, program9, builder);
     expect(result9).toBe(FloatType);
   });
 });
@@ -405,9 +432,10 @@ describe("Multi-Argument Functions", () => {
     envSetVal(env, "add3", add3Fn);
     
     const prog1 = appN(v("add3"), [int(1), int(2), int(3)]);
-    const program1 = exprToProgram(prog1);
-    const bytecode1 = lineariseProgram(program1, program1.rootIndex);
-    const result1 = runExpectingResult(bytecode1, env, program1);
+    const builder = new ProgramBuilder();
+    const program1 = exprToProgram(prog1, builder);
+    const bytecode1 = lineariseProgram(builder, program1.rootIndex);
+    const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toBe(IntType);
   });
 
@@ -417,9 +445,10 @@ describe("Multi-Argument Functions", () => {
     envSetVal(env, "mixed", mixedFn);
     
     const prog2 = appN(v("mixed"), [int(42), bool(true), int(3.14)]);
-    const program2 = exprToProgram(prog2);
-    const bytecode2 = lineariseProgram(program2, program2.rootIndex);
-    const result2 = runExpectingResult(bytecode2, env, program2);
+    const builder = new ProgramBuilder();
+    const program2 = exprToProgram(prog2, builder);
+    const bytecode2 = lineariseProgram(builder, program2.rootIndex);
+    const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toBe(BoolType);
   });
 
@@ -432,9 +461,10 @@ describe("Multi-Argument Functions", () => {
     envSetVal(env, "overloadedMulti", overloadedMultiFn);
     
     const prog3 = appN(v("overloadedMulti"), [int(10), int(20)]);
-    const program3 = exprToProgram(prog3);
-    const bytecode3 = lineariseProgram(program3, program3.rootIndex);
-    const result3 = runExpectingResult(bytecode3, env, program3);
+    const builder = new ProgramBuilder();
+    const program3 = exprToProgram(prog3, builder);
+    const bytecode3 = lineariseProgram(builder, program3.rootIndex);
+    const result3 = runExpectingResult(bytecode3, env, program3, builder);
     expect(result3).toBe(IntType);
   });
 
@@ -444,11 +474,12 @@ describe("Multi-Argument Functions", () => {
     envSetVal(env, "add3", add3Fn);
     
     const prog4 = appN(v("add3"), [int(1), int(2)]); // Only 2 args, needs 3
-    const program4 = exprToProgram(prog4);
-    const bytecode4 = lineariseProgram(program4, program4.rootIndex);
+    const builder = new ProgramBuilder();
+    const program4 = exprToProgram(prog4, builder);
+    const bytecode4 = lineariseProgram(builder, program4.rootIndex);
     
     expect(() => {
-      runExpectingResult(bytecode4, env, program4);
+      runExpectingResult(bytecode4, env, program4, builder);
     }).toThrow("expects 3 arguments but got 2");
   });
 
@@ -463,41 +494,44 @@ describe("Multi-Argument Functions", () => {
       appN(v("add3"), [int(1), int(2), int(3)]),
       int(10)
     ]);
-    const program5 = exprToProgram(prog5);
-    const bytecode5 = lineariseProgram(program5, program5.rootIndex);
-    const result5 = runExpectingResult(bytecode5, env, program5);
+    const builder = new ProgramBuilder();
+    const program5 = exprToProgram(prog5, builder);
+    const bytecode5 = lineariseProgram(builder, program5.rootIndex);
+    const result5 = runExpectingResult(bytecode5, env, program5, builder);
     expect(result5).toBe(IntType);
   });
 });
 
 describe("Generic Type System", () => {
   it("should handle generic identity function with Int", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Define a generic identity function: ∀T. T → T
-    const idScheme = scheme("id", getNextSchemeId(), ["T"], arrowN([tvar("T")], tvar("T")));
+    const idScheme = builder.scheme("id", ["T"], arrowN([tvar("T")], tvar("T")));
     envSetVal(env, "id", idScheme);
     
     // Test with Int
     const prog1 = app(v("id"), int(42));
-    const program1 = exprToProgram(prog1);
-    const bytecode1 = lineariseProgram(program1, program1.rootIndex);
-    const result1 = runExpectingResult(bytecode1, env, program1);
+    const program1 = exprToProgram(prog1, builder);
+    const bytecode1 = lineariseProgram(builder, program1.rootIndex);
+    const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toBe(IntType);
   });
 
   it("should handle generic identity function with Bool", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Define a generic identity function: ∀T. T → T
-    const idScheme = scheme("id", getNextSchemeId(), ["T"], arrowN([tvar("T")], tvar("T")));
+    const idScheme = builder.scheme("id", ["T"], arrowN([tvar("T")], tvar("T")));
     envSetVal(env, "id", idScheme);
     
     // Test with Bool
     const prog2 = app(v("id"), bool(true));
-    const program2 = exprToProgram(prog2);
-    const bytecode2 = lineariseProgram(program2, program2.rootIndex);
-    const result2 = runExpectingResult(bytecode2, env, program2);
+    const program2 = exprToProgram(prog2, builder);
+    const bytecode2 = lineariseProgram(builder, program2.rootIndex);
+    const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toBe(BoolType);
   });
 
@@ -522,39 +556,42 @@ describe("Generic Type System", () => {
 
   it("should handle type variable unification correctly", () => {
     // Test that TVar can only unify with itself
-    unify(tvar("T"), tvar("T"), false).getOrThrow();
+    const builder = new ProgramBuilder();
+    unify(tvar("T"), tvar("T"), false, builder).getOrThrow();
     
-    const error1 = unify(tvar("T"), tvar("U"), false).expectError();
+    const error1 = unify(tvar("T"), tvar("U"), false, builder).expectError();
     expect(error1).toBeDefined();
     
-    const error2 = unify(tvar("T"), IntType, false).expectError();
+    const error2 = unify(tvar("T"), IntType, false, builder).expectError();
     expect(error2).toBeDefined();
   });
 
   it("should handle type application correctly", () => {
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const builder = new ProgramBuilder();
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
     const listInt = tapp(listScheme, [IntType]);
     const listBool = tapp(listScheme, [BoolType]);
     
-    unify(listInt, listInt, false).getOrThrow();
+    unify(listInt, listInt, false, builder).getOrThrow();
     
-    const error3 = unify(listInt, listBool, false).expectError();
+    const error3 = unify(listInt, listBool, false, builder).expectError();
     expect(error3).toBeDefined();
   });
 });
 
 describe("Pending Bindings", () => {
   it("should handle basic pending binding scenario", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     env.set("missingVar", { value: { tag: "PendV", waiters: [] } });
     
     // Create a program that references a variable that's not in the environment
     const prog = v("missingVar");
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
     
     // Run the interpreter and expect it to suspend
-    const state = createInterpreterState(bytecode, env, program);
+    const state = createInterpreterState(bytecode, env, builder, program);
     const result = runInternal(state);
     
     expect(!isType(result)).toBe(true);
@@ -570,14 +607,15 @@ describe("Pending Bindings", () => {
   });
 
   it("should handle multiple lookups of the same pending variable", () => {
+    const builder = new ProgramBuilder();
     const prog2 = app(v("missingVar"), int(42)); // missingVar(42)
-    const program2 = exprToProgram(prog2);
-    const bytecode2 = lineariseProgram(program2, program2.rootIndex);
+    const program2 = exprToProgram(prog2, builder);
+    const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     const env2 = new Map();
     env2.set("missingVar", { tag: "Pending", waiters: [] });
 
     
-    const state2 = createInterpreterState(bytecode2, env2, program2);
+    const state2 = createInterpreterState(bytecode2, env2, builder, program2);
     const result2 = runInternal(state2);
     
     expect(!isType(result2)).toBe(true);
@@ -592,13 +630,14 @@ describe("Pending Bindings", () => {
   });
   
   it("should handle resume with error", () => {
+    const builder = new ProgramBuilder();
     const prog3 = v("anotherMissingVar");
-    const program3 = exprToProgram(prog3);
-    const bytecode3 = lineariseProgram(program3, program3.rootIndex);
+    const program3 = exprToProgram(prog3, builder);
+    const bytecode3 = lineariseProgram(builder, program3.rootIndex);
     const env3 = new Map();
     env3.set("anotherMissingVar", { tag: "Pending", waiters: [] });
     
-    const state3 = createInterpreterState(bytecode3, env3, program3);
+    const state3 = createInterpreterState(bytecode3, env3, builder, program3);
     const result3 = runInternal(state3);
     
     expect(!isType(result3)).toBe(true);
@@ -612,15 +651,16 @@ describe("Pending Bindings", () => {
   });
   
   it("should handle nested pending bindings", () => {
+    const builder = new ProgramBuilder();
     const prog4 = app(app(v("outerFunc"), v("innerVar")), int(10));
-    const program4 = exprToProgram(prog4);
-    const bytecode4 = lineariseProgram(program4, program4.rootIndex);
+    const program4 = exprToProgram(prog4, builder);
+    const bytecode4 = lineariseProgram(builder, program4.rootIndex);
 
     const env4 = new Map();
     env4.set("outerFunc", { tag: "Pending", waiters: [] });
     env4.set("innerVar", { tag: "Pending", waiters: [] });
 
-    const state4 = createInterpreterState(bytecode4, env4, program4);
+    const state4 = createInterpreterState(bytecode4, env4, builder, program4);
     const result4 = runInternal(state4);
 
     expect(!isType(result4)).toBe(true);
@@ -645,10 +685,11 @@ describe("Pending Bindings", () => {
 
 describe("Unbound Variables", () => {
   it("should reject simple unbound variable", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const prog = v("unboundVar");
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
     
     expect(() => {
       runExpectingResult(bytecode, env, program);
@@ -656,10 +697,11 @@ describe("Unbound Variables", () => {
   });
   
   it("should reject unbound variable in function application", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const prog2 = app(v("unboundFunc"), int(42));
-    const program2 = exprToProgram(prog2);
-    const bytecode2 = lineariseProgram(program2, program2.rootIndex);
+    const program2 = exprToProgram(prog2, builder);
+    const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     
     expect(() => {
       runExpectingResult(bytecode2, env, program2);
@@ -667,10 +709,11 @@ describe("Unbound Variables", () => {
   });
   
   it("should reject unbound variable in let binding", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const prog3 = _let("x", null, v("unboundInLet"));
-    const program3 = exprToProgram(prog3);
-    const bytecode3 = lineariseProgram(program3, program3.rootIndex);
+    const program3 = exprToProgram(prog3, builder);
+    const bytecode3 = lineariseProgram(builder, program3.rootIndex);
     
     expect(() => {
       runExpectingResult(bytecode3, env, program3);
@@ -678,10 +721,11 @@ describe("Unbound Variables", () => {
   });
   
   it("should reject unbound variable in nested scope", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const prog4 = lam("param", v("unboundInLambda"));
-    const program4 = exprToProgram(prog4);
-    const bytecode4 = lineariseProgram(program4, program4.rootIndex);
+    const program4 = exprToProgram(prog4, builder);
+    const bytecode4 = lineariseProgram(builder, program4.rootIndex);
     
     expect(() => {
       runExpectingResult(bytecode4, env, program4);
@@ -689,10 +733,11 @@ describe("Unbound Variables", () => {
   });
   
   it("should reject multiple unbound variables", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const prog5 = app(app(v("func1"), v("func2")), int(42));
-    const program5 = exprToProgram(prog5);
-    const bytecode5 = lineariseProgram(program5, program5.rootIndex);
+    const program5 = exprToProgram(prog5, builder);
+    const bytecode5 = lineariseProgram(builder, program5.rootIndex);
     
     expect(() => {
       runExpectingResult(bytecode5, env, program5);
@@ -700,13 +745,14 @@ describe("Unbound Variables", () => {
   });
   
   it("should reject unbound variable in mixed environment", () => {
+    const builder = new ProgramBuilder();
     const envWithSome: Env = new Map();
     envSetVal(envWithSome, "boundVar", IntType);
     envSetVal(envWithSome, "boundFunc", arrow(IntType, BoolType));
     
     const prog6 = app(app(v("boundFunc"), v("boundVar")), v("unboundVar"));
-    const program6 = exprToProgram(prog6);
-    const bytecode6 = lineariseProgram(program6, program6.rootIndex);
+    const program6 = exprToProgram(prog6, builder);
+    const bytecode6 = lineariseProgram(builder, program6.rootIndex);
     
     expect(() => {
       runExpectingResult(bytecode6, envWithSome, program6);
@@ -714,6 +760,7 @@ describe("Unbound Variables", () => {
   });
   
   it("should reject unbound variable in sequence", () => {
+    const builder = new ProgramBuilder();
     const envWithPrint: Env = new Map();
     envSetVal(envWithPrint, "print", arrow(IntType, UnitType));
     
@@ -722,8 +769,8 @@ describe("Unbound Variables", () => {
       v("unboundInSeq"),
       int(42)
     );
-    const program7 = exprToProgram(prog7);
-    const bytecode7 = lineariseProgram(program7, program7.rootIndex);
+    const program7 = exprToProgram(prog7, builder);
+    const bytecode7 = lineariseProgram(builder, program7.rootIndex);
     
     expect(() => {
       runExpectingResult(bytecode7, envWithPrint, program7);
@@ -731,13 +778,13 @@ describe("Unbound Variables", () => {
   });
 });
 
-function printProgram(program: Program) {
+function printProgram(program: Program, builder: ProgramBuilder) {
   console.log("Program nodes:", program.nodes.length);
   console.log("Program types:", program.types.length);
   console.log("Root index:", program.rootIndex);
   
   program.nodes.forEach((node, index) => {
-    const type = program.types[index] ? show(program.types[index]) : "null"
+    const type = program.types[index] ? show(program.types[index], builder) : "null"
     console.log(`${index}: ${type}: ${compactInspect(node)}`)
   });
 }
@@ -745,41 +792,45 @@ function printProgram(program: Program) {
 describe("Program-Based Type Checking", () => {
   it("should handle conversion from Expr to Program", () => {
     const expr = int(42);
-    const convertedProgram = exprToProgram(expr);
+    const builder = new ProgramBuilder();
+    const convertedProgram = exprToProgram(expr, builder);
 
     expect(convertedProgram.nodes.length).toBeGreaterThan(0);
     expect(convertedProgram.rootIndex).toBeDefined();
     
-    const bytecode5 = lineariseProgram(convertedProgram, convertedProgram.rootIndex);
-    const result5 = runExpectingResult(bytecode5, new Map(), convertedProgram);
+    const bytecode5 = lineariseProgram(builder, convertedProgram.rootIndex);
+    const result5 = runExpectingResult(bytecode5, new Map(), convertedProgram, builder);
     expect(result5).toBe(IntType);
   });
   
   it("should handle lambda expression conversion", () => {
     const lambdaExpr = lam("x", v("x")); // λx. x
-    const lambdaProgram = exprToProgram(lambdaExpr);
+    const builder = new ProgramBuilder();
+    const lambdaProgram = exprToProgram(lambdaExpr, builder);
     
     expect(lambdaProgram.nodes.length).toBeGreaterThan(0);
     expect(lambdaProgram.rootIndex).toBeDefined();
     
-    const bytecode6 = lineariseProgram(lambdaProgram, lambdaProgram.rootIndex);
-    const result6 = runExpectingResult(bytecode6, new Map(), lambdaProgram);
+    const bytecode6 = lineariseProgram(builder, lambdaProgram.rootIndex);
+    const result6 = runExpectingResult(bytecode6, new Map(), lambdaProgram, builder);
     expect(isArrowN(result6)).toBe(true);
   });
   
   it("should handle lambda application", () => {
     const lambdaExpr = lam("x", v("x")); // λx. x
     const lambdaAppExpr = app(lambdaExpr, int(42)); // (λx. x) 42
-    const lambdaAppProgram = exprToProgram(lambdaAppExpr);
+    const builder = new ProgramBuilder();
+    const lambdaAppProgram = exprToProgram(lambdaAppExpr, builder);
     
-    const bytecode7 = lineariseProgram(lambdaAppProgram, lambdaAppProgram.rootIndex);
-    const result7 = runExpectingResult(bytecode7, new Map(), lambdaAppProgram);
+    const bytecode7 = lineariseProgram(builder, lambdaAppProgram.rootIndex);
+    const result7 = runExpectingResult(bytecode7, new Map(), lambdaAppProgram, builder);
     expect(result7).toBe(IntType);
   });
   
   it("should handle multi-parameter lambda", () => {
     const multiLambdaExpr = lamN(["x", "y"], app(app(v("add"), v("x")), v("y"))); // λx y. add x y
-    const multiLambdaProgram = exprToProgram(multiLambdaExpr);
+    const builder = new ProgramBuilder();
+    const multiLambdaProgram = exprToProgram(multiLambdaExpr, builder);
     
     expect(multiLambdaProgram.nodes.length).toBeGreaterThan(0);
     
@@ -787,22 +838,23 @@ describe("Program-Based Type Checking", () => {
     const env8: Env = new Map();
     envSetVal(env8, "add", arrow(IntType, arrow(IntType, IntType)));
     
-    const bytecode8 = lineariseProgram(multiLambdaProgram, multiLambdaProgram.rootIndex);
-    const result8 = runExpectingResult(bytecode8, env8, multiLambdaProgram);
+    const bytecode8 = lineariseProgram(builder, multiLambdaProgram.rootIndex);
+    const result8 = runExpectingResult(bytecode8, env8, multiLambdaProgram, builder);
     expect(isArrowN(result8)).toBe(true);
   });
   
   it("should handle multi-parameter lambda application", () => {
     const multiLambdaExpr = lamN(["x", "y"], app(app(v("add"), v("x")), v("y"))); // λx y. add x y
     const multiLambdaAppExpr = appN(multiLambdaExpr, [int(10), int(20)]); // (λx y. add x y) 10 20
-    const multiLambdaAppProgram = exprToProgram(multiLambdaAppExpr);
+    const builder = new ProgramBuilder();
+    const multiLambdaAppProgram = exprToProgram(multiLambdaAppExpr, builder);
     
     // Set up environment with add function
     const env9: Env = new Map();
     envSetVal(env9, "add", arrow(IntType, arrow(IntType, IntType)));
     
-    const bytecode9 = lineariseProgram(multiLambdaAppProgram, multiLambdaAppProgram.rootIndex);
-    const result9 = runExpectingResult(bytecode9, env9, multiLambdaAppProgram);
+    const bytecode9 = lineariseProgram(builder, multiLambdaAppProgram.rootIndex);
+    const result9 = runExpectingResult(bytecode9, env9, multiLambdaAppProgram, builder);
     expect(result9).toBe(IntType);
   });
 });
@@ -818,9 +870,10 @@ describe("Generic Functions in Programs", () => {
       app(v("id"), int(42))  // Use it with Int
     );
     
-    const program = exprToProgram(programExpr);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, new Map(), program);
+    const builder = new ProgramBuilder();
+    const program = exprToProgram(programExpr, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, new Map(), program, builder);
     expect(result).toBe(IntType);
   });
 
@@ -923,14 +976,14 @@ describe("Generic Functions in Programs", () => {
 
 declare module "bun:test" {
   interface Matchers<T=unknown> {
-    toEqualType(expected: Type): T;
+    toEqualType(expected: Type, builder: ProgramBuilder): T;
   }
 }
 
 expect.extend({
-  toEqualType(received: Type, expected: Type) {
+  toEqualType(received: Type, expected: Type, builder: ProgramBuilder) {
     return {  
-      pass: areTypesEqual(received, expected),
+      pass: areTypesEqual(received, expected, builder),
       message: () => `expected ${received} to be ${expected}`,
     };
   },
@@ -938,6 +991,7 @@ expect.extend({
 
 describe("Type Annotation Resolution for Generic Structs", () => {
   it("should resolve simple non-generic struct annotations", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Define a simple non-generic struct: struct Point { x: Int, y: Int }
@@ -945,40 +999,42 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     envSetType(env, "Point", pointStruct);
     
     const prog = _let("p", v("Point"), null);
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
-    expect(result).toEqualType(pointStruct);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
+    expect(result).toEqualType(pointStruct, builder);
   });
 
   it("should resolve generic struct annotations with concrete type arguments", () => {
+    const builder = new ProgramBuilder()
     const env: Env = new Map();
     
     // Define a generic struct: struct List<T> { ... }
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
     const listInt = tapp(listScheme, [IntType]);
     const listBool = tapp(listScheme, [BoolType]);
     envSetType(env, "List", listScheme);
     
     const prog1 = _let("numbers", typeApp(v("List"), [v("Int")]), null);
-    const program1 = exprToProgram(prog1);
-    const bytecode1 = lineariseProgram(program1, program1.rootIndex);
-    const result1 = runExpectingResult(bytecode1, env, program1);
-    expect(result1).toEqualType(listInt);
+    const program1 = exprToProgram(prog1, builder);
+    const bytecode1 = lineariseProgram(builder, program1.rootIndex);
+    const result1 = runExpectingResult(bytecode1, env, program1, builder);
+    expect(result1).toEqualType(listInt, builder);
     
     const prog2 = _let("flags", typeApp(v("List"), [v("Bool")]), null);
-    const program2 = exprToProgram(prog2);
-    const bytecode2 = lineariseProgram(program2, program2.rootIndex);
-    const result2 = runExpectingResult(bytecode2, env, program2);
-    expect(result2).toEqualType(listBool);
+    const program2 = exprToProgram(prog2, builder);
+    const bytecode2 = lineariseProgram(builder, program2.rootIndex);
+    const result2 = runExpectingResult(bytecode2, env, program2, builder);
+    expect(result2).toEqualType(listBool, builder);
   });
 
   it("should resolve nested generic struct annotations", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Define generic structs: struct List<T> and struct Option<T>
-    const optionScheme = scheme("Option", getNextSchemeId(), ["T"], tstruct("Option", [{ name: "head", type: tvar("T") }]));
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const optionScheme = builder.scheme("Option", ["T"], tstruct("Option", [{ name: "head", type: tvar("T") }]));
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
     const optionListInt = tapp(optionScheme, [tapp(listScheme, [IntType])]);
     const listOptionInt = tapp(listScheme, [tapp(optionScheme, [IntType])]);
     
@@ -986,48 +1042,50 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     envSetType(env, "Option", optionScheme);
     
     const prog1 = _let("optList", typeApp(v("Option"), [typeApp(v("List"), [v("Int")])]), null);
-    const program1 = exprToProgram(prog1);
-    const bytecode1 = lineariseProgram(program1, program1.rootIndex);
-    const result1 = runExpectingResult(bytecode1, env, program1);
-    expect(result1).toEqualType(optionListInt);
+    const program1 = exprToProgram(prog1, builder);
+    const bytecode1 = lineariseProgram(builder, program1.rootIndex);
+    const result1 = runExpectingResult(bytecode1, env, program1, builder);
+    expect(result1).toEqualType(optionListInt, builder);
     
     const prog2 = _let("listOpt", typeApp(v("List"), [typeApp(v("Option"), [v("Int")])]), null);
-    const program2 = exprToProgram(prog2);
-    const bytecode2 = lineariseProgram(program2, program2.rootIndex);
-    const result2 = runExpectingResult(bytecode2, env, program2);
-    expect(result2).toEqualType(listOptionInt);
+    const program2 = exprToProgram(prog2, builder);
+    const bytecode2 = lineariseProgram(builder, program2.rootIndex);
+    const result2 = runExpectingResult(bytecode2, env, program2, builder);
+    expect(result2).toEqualType(listOptionInt, builder);
   });
 
   it("should resolve generic struct annotations with multiple type parameters", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Define a struct with multiple type parameters: struct Pair<T, U> { first: T, second: U }
-    const pairScheme = scheme("Pair", getNextSchemeId(), ["T", "U"], tstruct("Pair", [{ name: "first", type: tvar("T") }, { name: "second", type: tvar("U") }]));
+    const pairScheme = builder.scheme("Pair", ["T", "U"], tstruct("Pair", [{ name: "first", type: tvar("T") }, { name: "second", type: tvar("U") }]));
     const pairIntBool = tapp(pairScheme, [IntType, BoolType]);
     const pairFloatInt = tapp(pairScheme, [FloatType, IntType]);
     
     envSetType(env, "Pair", pairScheme);
     
     const prog1 = _let("mixed", typeApp(v("Pair"), [v("Int"), v("Bool")]), null);
-    const program1 = exprToProgram(prog1);
-    const bytecode1 = lineariseProgram(program1, program1.rootIndex);
-    const result1 = runExpectingResult(bytecode1, env, program1);
-    expect(result1).toEqualType(pairIntBool);
+    const program1 = exprToProgram(prog1, builder);
+    const bytecode1 = lineariseProgram(builder, program1.rootIndex);
+    const result1 = runExpectingResult(bytecode1, env, program1, builder);
+    expect(result1).toEqualType(pairIntBool, builder);
     
     const prog2 = _let("numbers", typeApp(v("Pair"), [v("Float"), v("Int")]), null);
-    const program2 = exprToProgram(prog2);
-    const bytecode2 = lineariseProgram(program2, program2.rootIndex);
-    const result2 = runExpectingResult(bytecode2, env, program2);
-    expect(result2).toEqualType(pairFloatInt);
+    const program2 = exprToProgram(prog2, builder);
+    const bytecode2 = lineariseProgram(builder, program2.rootIndex);
+    const result2 = runExpectingResult(bytecode2, env, program2, builder);
+    expect(result2).toEqualType(pairFloatInt, builder);
   });
 
   it("should resolve complex nested generic struct annotations", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Define multiple generic structs
-    const mapScheme = scheme("Map", getNextSchemeId(), ["T", "U"], tstruct("Map", [{ name: "key", type: tvar("T") }, { name: "value", type: tvar("U") }]));
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
-    const optionScheme = scheme("Option", getNextSchemeId(), ["T"], tstruct("Option", [{ name: "head", type: tvar("T") }]));
+    const mapScheme = builder.scheme("Map", ["T", "U"], tstruct("Map", [{ name: "key", type: tvar("T") }, { name: "value", type: tvar("U") }]));
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const optionScheme = builder.scheme("Option", ["T"], tstruct("Option", [{ name: "head", type: tvar("T") }]));
     const complexType = tapp(mapScheme, [
       tapp(listScheme, [IntType]),
       tapp(optionScheme, [BoolType])
@@ -1040,10 +1098,10 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     console.log('env', env);
     
     const prog = _let("complex", typeApp(v("Map"), [typeApp(v("List"), [v("Int")]), typeApp(v("Option"), [v("Bool")])]), null);
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
-    expect(result).toEqualType(complexType);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
+    expect(result).toEqualType(complexType, builder);
   });
 
   // TODO: implement type parameter constraints
@@ -1064,11 +1122,12 @@ describe("Type Annotation Resolution for Generic Structs", () => {
   // });
 
   it("should resolve generic struct annotations in function parameters", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Define a function that takes generic structs as parameters
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
-    const optionScheme = scheme("Option", getNextSchemeId(), ["T"], tstruct("Option", [{ name: "head", type: tvar("T") }]));
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const optionScheme = builder.scheme("Option", ["T"], tstruct("Option", [{ name: "head", type: tvar("T") }]));
     const listInt = tapp(listScheme, [IntType]);
     const optionBool = tapp(optionScheme, [BoolType]);
     
@@ -1084,17 +1143,18 @@ describe("Type Annotation Resolution for Generic Structs", () => {
       _let("opt", typeApp(v("Option"), [v("Bool")]), null),
       appN(v("process"), [v("list"), v("opt")])
     );
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
-    expect(result).toEqualType(IntType);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
+    expect(result).toEqualType(IntType, builder);
   });
 
   it("should resolve generic struct annotations in let bindings with function calls", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
-    const optionScheme = scheme("Option", getNextSchemeId(), ["T"], tstruct("Option", [{ name: "head", type: tvar("T") }]));
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const optionScheme = builder.scheme("Option", ["T"], tstruct("Option", [{ name: "head", type: tvar("T") }]));
     const listInt = tapp(listScheme, [IntType]);
     const optionInt = tapp(optionScheme, [IntType]);
     
@@ -1113,10 +1173,10 @@ describe("Type Annotation Resolution for Generic Structs", () => {
       int(999)
     );
     
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
-    expect(result).toEqualType(IntType);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
+    expect(result).toEqualType(IntType, builder);
   });
 
   // TODO: Not sure
@@ -1147,62 +1207,66 @@ describe("Type Annotation Resolution for Generic Structs", () => {
   // });
 
   it("should reject invalid generic struct annotations", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Define a struct that expects 2 type parameters
-    const pairScheme = scheme("Pair", getNextSchemeId(), ["T", "U"], tstruct("Pair", [{ name: "first", type: tvar("T") }, { name: "second", type: tvar("U") }]));
+    const pairScheme = builder.scheme("Pair", ["T", "U"], tstruct("Pair", [{ name: "first", type: tvar("T") }, { name: "second", type: tvar("U") }]));
     envSetType(env, "Pair", pairScheme);
     
     const prog1 = _let("invalid", typeApp(v("Pair"), [v("Int")]), null); // Missing second type parameter
-    const program1 = exprToProgram(prog1);
-    const bytecode1 = lineariseProgram(program1, program1.rootIndex);
+    const program1 = exprToProgram(prog1, builder);
+    const bytecode1 = lineariseProgram(builder, program1.rootIndex);
     
     expect(() => {
-      runExpectingResult(bytecode1, env, program1);
+      runExpectingResult(bytecode1, env, program1, builder);
     }).toThrow();
     
     const prog2 = _let("invalid2", typeApp(v("Pair"), [v("Int"), v("Bool"), v("Float")]), null); // Too many type parameters
-    const program2 = exprToProgram(prog2);
-    const bytecode2 = lineariseProgram(program2, program2.rootIndex);
+    const program2 = exprToProgram(prog2, builder);
+    const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     
     expect(() => {
-      runExpectingResult(bytecode2, env, program2);
+      runExpectingResult(bytecode2, env, program2, builder);
     }).toThrow();
   });
 
   it("should reject undefined struct annotations", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     const prog = _let("undefined", typeApp(v("UndefinedStruct"), [v("Int")]), null);
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
     
     expect(() => {
-      runExpectingResult(bytecode, env, program);
+      runExpectingResult(bytecode, env, program, builder);
     }).toThrow();
   });
 
   it("should handle generic struct annotations with primitive type widening", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
     const listFloat = tapp(listScheme, [FloatType]);
     
     envSetType(env, "List", listScheme);
     
     // Int should be accepted where Float is expected due to widening
     const prog = _let("numbers", typeApp(v("List"), [v("Float")]), null);
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
-    expect(result).toEqualType(listFloat);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
+    expect(result).toEqualType(listFloat, builder);
   });
 
   it("should resolve generic struct annotations in complex expressions", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
-    const optionScheme = scheme("Option", getNextSchemeId(), ["T"], tstruct("Option", [{ name: "head", type: tvar("T") }]));
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const optionScheme = builder.scheme("Option", ["T"], tstruct("Option", [{ name: "head", type: tvar("T") }]));
     const listInt = tapp(listScheme, [IntType]);
     const optionListInt = tapp(optionScheme, [listInt]);
     
@@ -1218,10 +1282,10 @@ describe("Type Annotation Resolution for Generic Structs", () => {
       int(999)
     );
     
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
-    expect(result).toEqualType(IntType);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
+    expect(result).toEqualType(IntType, builder);
   });
 
   // TODO: Support recursive types
@@ -1245,26 +1309,28 @@ describe("Type Annotation Resolution for Generic Structs", () => {
   // });
 
   it("should resolve generic struct annotations with higher-order types", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Define a struct that contains function types: struct Container<T> { fn: T -> T }
-    const containerScheme = scheme("Container", getNextSchemeId(), ["T"], tstruct("Container", [{ name: "fn", type: arrow(tvar("T"), tvar("T")) }]));
+    const containerScheme = builder.scheme("Container", ["T"], tstruct("Container", [{ name: "fn", type: arrow(tvar("T"), tvar("T")) }]));
     const containerFn = tapp(containerScheme, [arrow(IntType, IntType)]);
     
     envSetType(env, "Container", containerScheme);
     
     
     const prog = _let("container", typeApp(v("Container"), [typeApp(v("Fn"), [v("Int"),v("Int")])]), null);
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
-    expect(result).toEqualType(containerFn);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
+    expect(result).toEqualType(containerFn, builder);
   });
 
   it("should handle generic struct annotations with overloaded functions", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
     const listInt = tapp(listScheme, [IntType]);
     const listFloat = tapp(listScheme, [FloatType]);
     
@@ -1281,36 +1347,37 @@ describe("Type Annotation Resolution for Generic Structs", () => {
       _let("list", typeApp(v("List"), [v("Int")]), null),
       app(v("overloadedFn"), v("list"))
     );
-    const program1 = exprToProgram(prog1);
-    const bytecode1 = lineariseProgram(program1, program1.rootIndex);
-    const result1 = runExpectingResult(bytecode1, env, program1);
+    const program1 = exprToProgram(prog1, builder);
+    const bytecode1 = lineariseProgram(builder, program1.rootIndex);
+    const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toBe(IntType);
     
     const prog2 = block(
       _let("list", typeApp(v("List"), [v("Float")]), null),
       app(v("overloadedFn"), v("list"))
     );
-    const program2 = exprToProgram(prog2);
-    const bytecode2 = lineariseProgram(program2, program2.rootIndex);
-    const result2 = runExpectingResult(bytecode2, env, program2);
+    const program2 = exprToProgram(prog2, builder);
+    const bytecode2 = lineariseProgram(builder, program2.rootIndex);
+    const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toBe(FloatType);
   });
 });
 
 describe("storeType Tests", () => {
   // Helper function to verify that types are stored for all relevant nodes
-  const verifyTypesStored = (program: Program, expectedTypes: Map<number, Type>) => {
+  const verifyTypesStored = (program: Program, expectedTypes: Map<number, Type>, builder: ProgramBuilder) => {
     for (const [nodeIndex, expectedType] of expectedTypes) {
       expect(program.types[nodeIndex]).toBeDefined();
-      expect(program.types[nodeIndex]).toEqualType(expectedType);
+      expect(program.types[nodeIndex]).toEqualType(expectedType, builder);
     }
   };
 
   it("should store types for primitive literals", () => {
+    const builder = new ProgramBuilder();
     const prog = int(42);
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, new Map(), program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, new Map(), program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(IntType);
@@ -1318,10 +1385,11 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for boolean literals", () => {
+    const builder = new ProgramBuilder();
     const prog = bool(true);
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, new Map(), program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, new Map(), program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(BoolType);
@@ -1329,13 +1397,14 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for variable references", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     envSetVal(env, "x", IntType);
     
     const prog = v("x");
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(IntType);
@@ -1343,14 +1412,15 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for function applications", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const addFn = arrow(IntType, arrow(IntType, IntType));
     envSetVal(env, "add", addFn);
     
     const prog = app(app(v("add"), int(5)), int(3));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(IntType);
@@ -1358,6 +1428,7 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for all nodes in a complex expression", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const addFn = arrow(IntType, arrow(IntType, IntType));
     const isPositiveFn = arrow(IntType, BoolType);
@@ -1366,9 +1437,9 @@ describe("storeType Tests", () => {
     
     // Create a complex expression: isPositive(add(5, 3))
     const prog = app(v("isPositive"), app(app(v("add"), int(5)), int(3)));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(BoolType);
@@ -1387,6 +1458,7 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for conditional expressions", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     envSetVal(env, "x", IntType);
     envSetVal(env, "y", IntType);
@@ -1395,9 +1467,9 @@ describe("storeType Tests", () => {
     // Note: This test needs to be adjusted since the current system doesn't support
     // boolean conditions properly. We'll test with a simpler conditional.
     const prog = _if(bool(true), v("x"), v("y"));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(IntType);
@@ -1405,14 +1477,15 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for function declarations", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Create: fun f(x: Int): Int { x }
     // Note: Function declarations need special handling in the lineariser
     const prog = lam("x", v("x"));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the function type was stored
     expect(program.types[program.rootIndex]).toBeDefined();
@@ -1420,6 +1493,7 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for nested expressions", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const addFn = arrow(IntType, arrow(IntType, IntType));
     const mulFn = arrow(IntType, arrow(IntType, IntType));
@@ -1428,9 +1502,9 @@ describe("storeType Tests", () => {
     
     // Create: add(mul(2, 3), 4)
     const prog = app(app(v("add"), app(app(v("mul"), int(2)), int(3))), int(4));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(IntType);
@@ -1438,15 +1512,16 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for sequence expressions", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     envSetVal(env, "x", IntType);
     envSetVal(env, "y", IntType);
     
     // Create: { x; y }
     const prog = block(v("x"), v("y"));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(IntType);
@@ -1454,14 +1529,15 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for let expressions", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     envSetVal(env, "x", IntType);
     
     // Create: let y = x in y
     const prog = _let("y", null, v("x"));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     // Note: Let expressions may not store types in the current implementation
@@ -1469,6 +1545,7 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for overloaded function applications", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const overloadedFn = overload([
       arrow(IntType, IntType),
@@ -1478,9 +1555,9 @@ describe("storeType Tests", () => {
     
     // Create: f(42)
     const prog = app(v("f"), int(42));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(IntType);
@@ -1488,21 +1565,23 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for type applications", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
     envSetType(env, "List", listScheme);
     
     const prog = _let("list", typeApp(v("List"), [v("Int")]), null);
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
     
-    const result = runExpectingResult(bytecode, env, program);
-    expect(result).toEqualType(tapp(listScheme, [IntType]));
+    const result = runExpectingResult(bytecode, env, program, builder);
+    expect(result).toEqualType(tapp(listScheme, [IntType]), builder);
 
-    expect(program.types[program.rootIndex]).toEqualType(tapp(listScheme, [IntType]));
+    expect(program.types[program.rootIndex]).toEqualType(tapp(listScheme, [IntType]), builder);
   });
 
   it("should verify all nodes have types stored after type checking", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const addFn = arrow(IntType, arrow(IntType, IntType));
     const isPositiveFn = arrow(IntType, BoolType);
@@ -1511,9 +1590,9 @@ describe("storeType Tests", () => {
     
     // Create a complex expression with multiple nodes
     const prog = app(v("isPositive"), app(app(v("add"), int(5)), int(3)));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Verify that all nodes that should have types stored actually have them
     for (let i = 0; i < program.nodes.length; i++) {
@@ -1529,14 +1608,15 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for function parameters", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     
     // Create: fun f(x: Int): Int { x }
     // Note: Function declarations need special handling
     const prog = lam("x", v("x"));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the function type was stored
     expect(program.types[program.rootIndex]).toBeDefined();
@@ -1546,6 +1626,7 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for complex nested function applications", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const addFn = arrow(IntType, arrow(IntType, IntType));
     const mulFn = arrow(IntType, arrow(IntType, IntType));
@@ -1564,9 +1645,9 @@ describe("storeType Tests", () => {
         app(app(v("mul"), int(4)), int(5))
       )
     );
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(BoolType);
@@ -1582,6 +1663,7 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for deeply nested expressions", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const addFn = arrow(IntType, arrow(IntType, IntType));
     const mulFn = arrow(IntType, arrow(IntType, IntType));
@@ -1599,9 +1681,9 @@ describe("storeType Tests", () => {
       ), 
       app(app(v("mul"), int(4)), int(5))
     );
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(IntType);
@@ -1621,6 +1703,7 @@ describe("storeType Tests", () => {
   });
 
   it("should store types for expressions with mixed types", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const addFn = arrow(IntType, arrow(IntType, IntType));
     const isPositiveFn = arrow(IntType, BoolType);
@@ -1636,9 +1719,9 @@ describe("storeType Tests", () => {
         app(app(v("add"), int(5)), int(3))
       )
     );
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBe(BoolType);
@@ -1658,45 +1741,47 @@ describe("storeType Tests", () => {
       }
     }
     
-    verifyTypesStored(program, expectedTypes);
+    verifyTypesStored(program, expectedTypes, builder);
   });
 
   it("should store types for expressions with type variables", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
     const idFn = arrow(tvar("T"), tvar("T"));
-    const idScheme = scheme("id", getNextSchemeId(), ["T"], idFn);
+    const idScheme = builder.scheme("id", ["T"], idFn);
     envSetVal(env, "id", idScheme);
     
     // Create: id(42)
     const prog = app(v("id"), int(42));
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
     
-    const result = runExpectingResult(bytecode, env, program);
-    expect(result).toEqualType(IntType);
-    expect(program.types[program.rootIndex]).toEqualType(IntType);
+    const result = runExpectingResult(bytecode, env, program, builder);
+    expect(result).toEqualType(IntType, builder);
+    expect(program.types[program.rootIndex]).toEqualType(IntType, builder);
 
     // Check application 
     const app_ = program.apps.get(program.rootIndex)!
     expect(app_).toBeDefined();
-    expect(app_.fn).toEqualType(arrowN([IntType], IntType));
+    expect(app_.fn).toEqualType(arrowN([IntType], IntType), builder);
     expect(app_.args).toEqual([IntType]);
     expect(app_.typeArgs).toEqual([]);
-    expect(app_.result).toEqualType(IntType);
+    expect(app_.result).toEqualType(IntType, builder);
 
     const inst = program.instantiations.filter(x => x.schemeId === idScheme.id)
     expect(inst).toHaveLength(1);
-    expect(inst[0]!.mono).toEqualType(tapp(idScheme, [IntType])); // TODO: A bit confused when to use tapp or arrow
-    expect(inst[0]!.args[0]).toEqualType(IntType);
+    expect(inst[0]!.mono).toEqualType(tapp(idScheme, [IntType]), builder); // TODO: A bit confused when to use tapp or arrow
+    expect(inst[0]!.args[0]).toEqualType(IntType, builder);
     expect(program.schemes.get(idScheme.id)).toEqual(idScheme);
     
   });
 
   it("should store types for expressions with complex type schemes", () => {
+    const builder = new ProgramBuilder();
     const env: Env = new Map();
-    const listScheme = scheme("List", getNextSchemeId(), ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
+    const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
     const mapFn = arrow(tapp(listScheme, [tvar("A")]), arrow(arrow(tvar("A"), tvar("B")), tapp(listScheme, [tvar("B")])));
-    const mapScheme = scheme("Map", getNextSchemeId(), ["A", "B"], mapFn)
+    const mapScheme = builder.scheme("Map", ["A", "B"], mapFn)
     envSetType(env, "List", listScheme);
     envSetVal(env, "map", mapScheme);
     
@@ -1706,9 +1791,9 @@ describe("storeType Tests", () => {
       _let("list", typeApp(v("List"), [v("Int")]), null),
       app(v("map"), v("list"))
     );
-    const program = exprToProgram(prog);
-    const bytecode = lineariseProgram(program, program.rootIndex);
-    const result = runExpectingResult(bytecode, env, program);
+    const program = exprToProgram(prog, builder);
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // Check that the type was stored for the root node
     expect(program.types[program.rootIndex]).toBeDefined();
@@ -1716,5 +1801,251 @@ describe("storeType Tests", () => {
 
     expect(program.schemes.get(listScheme.id)).toEqual(listScheme);
     expect(program.schemes.get(mapScheme.id)).toEqual(mapScheme);
+  });
+});
+
+describe("Type Constraints System", () => {
+  it("should register traits and implementations", () => {
+    // Create a builder for isolated state
+    const builder = new ProgramBuilder();
+    
+    // Register some traits
+    builder.traitTable.set(1, { id: 1, name: "Ord" });
+    builder.traitTable.set(2, { id: 2, name: "Hash" });
+    builder.traitTable.set(3, { id: 3, name: "Eq" });
+
+    // Register some implementations
+    builder.traitImpls.set(`1|Int`, true);  // Int implements Ord
+    builder.traitImpls.set(`2|Int`, true);  // Int implements Hash
+    builder.traitImpls.set(`3|Int`, true);  // Int implements Eq
+
+    // Test hasTrait function
+    expect(hasTrait(IntType, 1, builder)).toBe(true);
+    expect(hasTrait(IntType, 2, builder)).toBe(true);
+    expect(hasTrait(IntType, 3, builder)).toBe(true);
+    expect(hasTrait(BoolType, 1, builder)).toBe(false);
+  });
+
+  it("should create bounds correctly", () => {
+    // Test createBounds function
+    const bounds = createBounds(
+      [{ tvar: "T", traitId: 1 }],  // T: Ord
+      [{ tvar: "T", upper: IntType }] // T ≤ Int
+    );
+
+    expect(bounds.length).toBe(2);
+    expect(bounds[0]?.kind).toBe("Trait");
+    expect(bounds[1]?.kind).toBe("Subtype");
+  });
+
+  it("should create schemes with bounds", () => {
+    const bounds = createBounds([
+      { tvar: "T", traitId: 1 }  // T: Ord
+    ]);
+
+    // Test scheme with bounds
+    const maxScheme = scheme("max", 1, ["T"], arrowN([tvar("T"), tvar("T")], tvar("T")), bounds);
+    
+    expect(maxScheme.bounds).toBeDefined();
+    expect(maxScheme.bounds!.length).toBe(1);
+  });
+
+  it("should validate trait requirements inside generic bodies", () => {
+    // Create a builder for isolated state
+    const builder = new ProgramBuilder();
+    
+    // Set up active bounds for testing
+    builder.activeTraitBounds.set("T", new Set([1, 2, 3]));
+
+    // Note: requireTraitNow still uses global activeTraitBounds
+    // We need to update it to accept a builder parameter
+    // For now, this test shows the pattern but won't work until
+    // requireTraitNow is updated
+    
+    // Test requireTraitNow with valid trait
+    expect(() => {
+      requireTraitNow(tvar("T"), 1, dummy, builder);
+    }).not.toThrow();
+
+    // Test requireTraitNow with invalid trait
+    expect(() => {
+      requireTraitNow(tvar("T"), 999, dummy, builder);
+    }).toThrow();
+  });
+
+  it("should validate concrete type trait implementations", () => {
+    // Create a builder for isolated state
+    const builder = new ProgramBuilder();
+    
+    // Register traits and implementations in builder
+    builder.traitTable.set(1, { id: 1, name: "Ord" });
+    builder.traitImpls.set(`1|Int`, true);
+
+    // Note: requireTraitNow still uses global traitTable and traitImpls
+    // We need to update it to accept a builder parameter
+    // For now, we'll use the global functions
+    
+    // Test concrete type with trait
+    expect(() => {
+      requireTraitNow(IntType, 1, dummy, builder);
+    }).not.toThrow();
+
+    // Test concrete type without trait
+    expect(() => {
+      requireTraitNow(BoolType, 1, dummy, builder);
+    }).toThrow();
+  });
+
+  it("should handle obligation system", () => {
+    // Register traits and implementations
+    const builder = new ProgramBuilder();
+    registerTrait(builder, 1, "Ord");
+    registerTraitImpl(builder, 1, IntType);
+
+    expect(builder.pendingObligations.length).toBe(0);
+
+    // Simulate adding an obligation
+    const obligation = {
+      kind: "Trait" as const,
+      traitId: 1,
+      ty: IntType,
+      loc: dummy,
+      instKey: "test_1_Int"
+    };
+
+    const mockState = createInterpreterState([], new Map(), builder);
+    mockState.builder.pendingObligations.push(obligation);
+    expect(mockState.builder.pendingObligations.length).toBe(1);
+
+    // Discharge obligations
+    dischargeDeferredObligations(mockState);
+    expect(mockState.builder.pendingObligations.length).toBe(0);
+  });
+
+  it("should type check generic function with trait bounds", () => {
+    // Register traits and implementations
+    const builder = new ProgramBuilder();
+    registerTrait(builder, 1, "Ord");
+    registerTraitImpl(builder, 1, IntType);
+    registerTraitImpl(builder, 1, BoolType);
+
+    // Create a generic max function with trait bounds
+    const maxExpr = funDecl("max", ["T"], ["a", "b"], int(0), ["T", "T"], "T");
+    const program = exprToProgram(maxExpr, builder);
+
+    // Find the scheme by function name
+    const scheme = Array.from(program.schemes.values()).find(s => s.name === "max");
+    expect(scheme).toBeDefined();
+    
+    if (scheme) {
+      scheme.bounds = createBounds([
+        { tvar: "T", traitId: 1 }  // T: Ord
+      ]);
+    }
+
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, new Map(), program, builder);
+    
+    // The result should be a function type with trait constraints
+    expect(result).toBeDefined();
+  });
+
+  it("should reject instantiation with types that don't implement required traits", () => {
+    // Register traits but don't implement for Float
+    const builder = new ProgramBuilder();
+    registerTrait(builder, 1, "Ord");
+    registerTraitImpl(builder, 1, IntType);
+    // Note: FloatType does NOT implement Ord
+
+    // Create a simple test that directly tests the constraint system
+    const testScheme = scheme("test", 999, ["T"], arrowN([tvar("T"), tvar("T")], tvar("T")), [
+      { kind: "Trait", tvar: "T", traitId: 1 }  // T: Ord
+    ]);
+
+    // This should fail because Float doesn't implement Ord
+    expect(() => {
+      emitObligationsForInstantiation(testScheme, [FloatType], dummy, "test_key", builder);
+      const mockState = createInterpreterState([], new Map(), builder);
+      dischargeDeferredObligations(mockState);
+    }).toThrow();
+  });
+
+  it("should handle multiple trait bounds", () => {
+    // Register multiple traits
+    const builder = new ProgramBuilder();
+    registerTrait(builder, 1, "Ord");
+    registerTrait(builder, 2, "Hash");
+    registerTrait(builder, 3, "Eq");
+    
+    // Int implements all three
+    registerTraitImpl(builder, 1, IntType);
+    registerTraitImpl(builder, 2, IntType);
+    registerTraitImpl(builder, 3, IntType);
+
+    // Create a generic function with multiple trait bounds
+    const mapExpr = funDecl("map", ["K", "V"], ["key", "value"], int(0), ["K", "V"], "Unit");
+    const program = exprToProgram(mapExpr, builder);
+
+    // Find the scheme by function name
+    const scheme = Array.from(program.schemes.values()).find(s => s.name === "map");
+    expect(scheme).toBeDefined();
+    
+    if (scheme) {
+      scheme.bounds = createBounds([
+        { tvar: "K", traitId: 2 },  // K: Hash
+        { tvar: "K", traitId: 3 }   // K: Eq
+      ]);
+    }
+
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, new Map(), program, builder);
+    
+    expect(result).toBeDefined();
+  });
+
+  it("should handle subtype bounds", () => {
+    // Register traits
+    const builder = new ProgramBuilder();
+    registerTrait(builder, 1, "Ord");
+    registerTraitImpl(builder, 1, IntType);
+
+    // Create a generic function with subtype bounds
+    const numericExpr = funDecl("numeric", ["T"], ["x"], int(0), ["T"], "T");
+    const program = exprToProgram(numericExpr, builder);
+
+    // Find the scheme by function name
+    const scheme = Array.from(program.schemes.values()).find(s => s.name === "numeric");
+    expect(scheme).toBeDefined();
+    
+    if (scheme) {
+      scheme.bounds = createBounds(
+        [{ tvar: "T", traitId: 1 }],  // T: Ord
+        [{ tvar: "T", upper: IntType }] // T ≤ Int
+      );
+    }
+
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, new Map(), program, builder);
+    
+    expect(result).toBeDefined();
+  });
+
+  it("should handle nested generic instantiation with bounds", () => {
+    // Register traits
+    const builder = new ProgramBuilder();
+    registerTrait(builder, 1, "Ord");
+    registerTraitImpl(builder, 1, IntType);
+
+    // Create a simple test that directly tests the constraint system with nested types
+    const testScheme = scheme("container", 999, ["T"], arrowN([tvar("T")], tvar("T")), [
+      { kind: "Trait", tvar: "T", traitId: 1 }  // T: Ord
+    ]);
+
+    // This should succeed because Int implements Ord
+    expect(() => {
+      emitObligationsForInstantiation(testScheme, [IntType], dummy, "test_key", builder);
+      const mockState = createInterpreterState([], new Map(), builder);
+      dischargeDeferredObligations(mockState);
+    }).not.toThrow();
   });
 });

@@ -142,7 +142,6 @@ const dummy: Loc = { file: "<repl>", line: 0, col: 0,
 /*======================================================================*/
 /* 1.  Types, unknowns, occurs-check unification                        */
 /*======================================================================*/
-let nextU = 0;
 
 // Base class for all types (aligning with defs.ts)
 abstract class TypeRoot {
@@ -157,7 +156,7 @@ abstract class TypeRoot {
 // Unknown type for type inference (from bidi)
 export class UnknownType extends TypeRoot {
   constructor(public id: number) { super() }
-  toString() { return `?${this.id} (${show(this)})` }
+  toString() { return `?${this.id}` }
 }
 
 // Type variable for generics (aligning with defs.ts)
@@ -175,35 +174,250 @@ export class PrimitiveType extends TypeRoot {
 // Function types (using only ArrowN for consistency)
 export class ArrowNType extends TypeRoot {
   constructor(public params: Type[], public result: Type) { super() }
-  toString() { return show(this) }
+  toString() { return show(this, null) }
 }
 
 // Overload type (from bidi)
 export class OverloadType extends TypeRoot {
   constructor(public alts: ArrowNType[]) { super() }
-  toString() { return show(this) }
+  toString() { return show(this, null) }
 }
 
 // Struct type (aligning with defs.ts)
 export class StructType extends TypeRoot {
   constructor(public name: string, public fields: { name: string; type: Type }[]) { super() }
-  toString() { return show(this) }
+  toString() { return show(this, null) }
 }
 
 // Type application (aligning with defs.ts)
 export class AppliedType extends TypeRoot {
   constructor(public ctor: string, public schemeId: number, public args: Type[]) { super() }
-  toString() { return show(this) }
+  toString() { return show(this, null) }
 }
 
 // Type parameter declaration (aligning with defs.ts)
 export class TypeParameterDecl extends TypeRoot {
   constructor(public name: string, public constraints: Type[], public scopeId: string) { super() }
-  toString() { return show(this) }
+  toString() { return show(this, null) }
 }
 
-// Scheme for polymorphic types (from bidi)
-export interface Scheme { name: string; id: number; vars: string[]; body: Type }
+// Type constraints system
+export type Bound =
+  | { kind: "Trait"; tvar: string; traitId: number }
+  | { kind: "Subtype"; tvar: string; upper: Type };
+
+// Scheme for polymorphic types (extended with bounds)
+export interface Scheme { 
+  name: string; 
+  id: number; 
+  vars: string[]; 
+  body: Type;
+  bounds?: Bound[];
+}
+
+// Trait catalogue & impl DB
+export interface Trait { id: number; name: string }
+
+// Helper function to generate a unique key for a type
+function typeKey(t: Type, builder: ProgramBuilder): string {
+  t = resolve(t, builder);
+  if (isUnknown(t)) return `?${t.id}`;
+  if (isTVar(t)) return t.name;
+  if (isPrimitive(t)) return t.name;
+  if (isTApp(t)) return `${t.ctor}<${t.args.map(arg => typeKey(arg, builder)).join(",")}>`;
+  if (isArrowN(t)) return `(${t.params.map(arg => typeKey(arg, builder)).join(",")}→${typeKey(t.result, builder)})`;
+  if (isStructType(t)) return `${t.name}{${t.fields.map(f => `${f.name}:${typeKey(f.type, builder)}`).join(",")}}`;
+  if (isOverload(t)) return `{${t.alts.map(alt => typeKey(alt, builder)).join("|")}}`;
+  return "unknown";
+}
+
+export const hasTrait = (ty: Type, traitId: number, builder: ProgramBuilder): boolean =>
+  builder.traitImpls.has(`${traitId}|${typeKey(ty, builder)}`);
+
+// Helper function to check if a type contains unknowns
+function containsUnknown(t: Type, builder: ProgramBuilder): boolean {
+  t = resolve(t, builder);
+  if (isUnknown(t)) return true;
+  if (isArrowN(t)) return t.params.some(p => containsUnknown(p, builder)) || containsUnknown(t.result, builder);
+  if (isOverload(t)) return t.alts.some(alt => {
+    if (isArrowN(alt)) return alt.params.some(p => containsUnknown(p, builder)) || containsUnknown(alt.result, builder);
+    return false;
+  });
+  if (isTApp(t)) return t.args.some(arg => containsUnknown(arg, builder));
+  if (isStructType(t)) return t.fields.some(f => containsUnknown(f.type, builder));
+  return false;
+}
+
+// Helper function to generate canonical key for instantiation
+function canonicalKey(schemeId: number, args: Type[], builder: ProgramBuilder): string {
+  return JSON.stringify({ schemeId, args: args.map(arg => typeKey(arg, builder)) });
+}
+
+// Obligations: create now, check now or later
+export type Obligation =
+  | { kind: "Trait"; traitId: number; ty: Type; loc: Loc; instKey: string }
+  | { kind: "Subtype"; left: Type; right: Type; loc: Loc; instKey: string };
+
+
+// Helper function to fail with a location-aware error
+function fail(loc: Loc, message: string): never {
+  throw new Error(`${loc.file}:${loc.line}:${loc.col}: ${message}`);
+}
+
+// Convert bounds(TVar) → obligations(TypeArg) and either check or defer
+function emitObligationsForInstantiation(s: Scheme, args: Type[], loc: Loc, instKey: string, b: ProgramBuilder) {
+  if (!s.bounds) return;
+  
+  const sub = new Map<string, Type>();
+  s.vars.forEach((v, i) => sub.set(v, args[i]!));
+
+  for (const bound of s.bounds) {
+    switch (bound.kind) {
+      case "Trait": {
+        const ty = substWalk(tvar(bound.tvar), sub);
+        const ob: Obligation = { kind: "Trait", traitId: bound.traitId, ty, loc, instKey };
+        tryCheckOrDefer(ob, b);
+        break;
+      }
+      case "Subtype": {
+        const left = substWalk(tvar(bound.tvar), sub);
+        const right = substWalk(bound.upper, sub);
+        const ob: Obligation = { kind: "Subtype", left, right, loc, instKey };
+        tryCheckOrDefer(ob, b);
+        break;
+      }
+    }
+  }
+}
+
+function tryCheckOrDefer(ob: Obligation, b: ProgramBuilder) {
+  // If any side still has Unknowns, we can't decide now → defer.
+  if (ob.kind === "Trait") {
+    if (containsUnknown(ob.ty, b)) { 
+      b.pendingObligations.push(ob); 
+      return; 
+    }
+    if (!hasTrait(ob.ty, ob.traitId, b)) {
+      const traitName = b.traitTable.get(ob.traitId)?.name || `trait_${ob.traitId}`;
+      fail(ob.loc, `type ${show(ob.ty, b)} does not implement ${traitName}`);
+    }
+  } else {
+    if (containsUnknown(ob.left, b) || containsUnknown(ob.right, b)) { 
+      b.pendingObligations.push(ob); 
+      return; 
+    }
+    // Use your ≤ checker (subsume) *speculatively* with rollback to avoid side-effects
+    const mark = startTrial(b);
+    try { 
+      subsume(ob.left, ob.right, true, b).getOrThrow(); 
+      rollback(mark, b); 
+    } catch { 
+      rollback(mark, b); 
+      fail(ob.loc, `constraint not satisfied: ${show(ob.left, b)} ≤ ${show(ob.right, b)}`); 
+    }
+  }
+}
+
+// Substitution function for type variables (used in emitObligationsForInstantiation)
+function substWalk(t: Type, subst: Map<string, Type>): Type {
+  if (isTVar(t)) {
+    const replacement = subst.get(t.name);
+    return replacement ? replacement : t;
+  }
+  if (isUnknown(t)) {
+    return t; // Unknown types are not substituted
+  }
+  if (isArrowN(t)) {
+    return arrowN(t.params.map(p => substWalk(p, subst)), substWalk(t.result, subst));
+  }
+  if (isOverload(t)) {
+    return overload(t.alts.map(alt => {
+      return arrowN(alt.params.map(p => substWalk(p, subst)), substWalk(alt.result, subst));
+    }));
+  }
+  if (isTApp(t)) {
+    // For AppliedType, just substitute the args
+    return new AppliedType(t.ctor, t.schemeId, t.args.map(arg => substWalk(arg, subst)));
+  }
+  if (isStructType(t)) {
+    const struct = t as StructType;
+    return tstruct(struct.name, struct.fields.map(f => ({ name: f.name, type: substWalk(f.type, subst) })));
+  }
+  if (isPrimitive(t)) {
+    return t; // Primitive types are not substituted
+  }
+  // For any other type, return as-is
+  return t;
+}
+
+// Function to require trait now (for checking inside generic bodies)
+function requireTraitNow(ty: Type, traitId: number, loc: Loc, builder: ProgramBuilder) {
+  ty = resolve(ty, builder);
+
+  if (isTVar(ty)) {
+    if (!builder.activeTraitBounds.get(ty.name)?.has(traitId)) {
+      const traitName = builder.traitTable.get(traitId)?.name || `trait_${traitId}`;
+      fail(loc, `Using a value of type ${ty.name} requires ${traitName}; add it to the function's bounds`);
+    }
+    return;
+  }
+  // concrete types can be checked immediately
+  if (!hasTrait(ty, traitId, builder)) {
+    const traitName = builder.traitTable.get(traitId)?.name || `trait_${traitId}`;
+    fail(loc, `type ${show(ty, builder)} does not implement ${traitName}`);
+  }
+}
+
+// Function to discharge deferred obligations (call after type solving)
+function dischargeDeferredObligations(state: InterpreterState) {
+  const b = state.builder;
+  for (const ob of b.pendingObligations) {
+    if (ob.kind === "Trait") {
+      const t = resolve(ob.ty, b);
+      if (!hasTrait(t, ob.traitId, b)) {
+        const traitName = b.traitTable.get(ob.traitId)?.name || `trait_${ob.traitId}`;
+        fail(ob.loc, `type ${show(t, b)} does not implement ${traitName}`);
+      }
+    } else {
+      const L = resolve(ob.left, b), R = resolve(ob.right, b);
+      const mark = startTrial(b);
+      try { 
+        subsume(L, R, true, b).getOrThrow(); 
+        rollback(mark, b); 
+      } catch { 
+        rollback(mark, b); 
+        fail(ob.loc, `constraint not satisfied: ${show(L, b)} ≤ ${show(R, b)}`); 
+      }
+    }
+    // (optional) attach the (traitId,type) to the specialisation entry keyed by ob.instKey
+    // attachRequiredImpl(ob.instKey, ob);
+  }
+  b.pendingObligations.length = 0;
+}
+
+// Helper functions to register traits and implementations
+function registerTrait(builder: ProgramBuilder, id: number, name: string): void {
+  builder.traitTable.set(id, { id, name });
+}
+
+function registerTraitImpl(builder: ProgramBuilder, traitId: number, type: Type): void {
+  builder.traitImpls.set(`${traitId}|${typeKey(type, builder)}`, true);
+}
+
+// Helper function to create bounds for a scheme
+function createBounds(traitBounds: Array<{ tvar: string; traitId: number }>, subtypeBounds: Array<{ tvar: string; upper: Type }> = []): Bound[] {
+  const bounds: Bound[] = [];
+  
+  for (const { tvar, traitId } of traitBounds) {
+    bounds.push({ kind: "Trait", tvar, traitId });
+  }
+  
+  for (const { tvar, upper } of subtypeBounds) {
+    bounds.push({ kind: "Subtype", tvar, upper });
+  }
+  
+  return bounds;
+}
 
 // Union type for all types
 export type Type = 
@@ -216,15 +430,15 @@ export type Type =
   | StructType
   | TypeParameterDecl
 
-const areTypesEqual = (t1: Type, t2: Type): boolean => {
-  t1 = resolve(t1);
-  t2 = resolve(t2);
-  const areTypeListsEqual = (l1: Type[], l2: Type[]): boolean => l1.length === l2.length && l1.every((t, i) => areTypesEqual(t, l2[i]!));
+const areTypesEqual = (t1: Type, t2: Type, builder: ProgramBuilder): boolean => {
+  t1 = resolve(t1, builder);
+  t2 = resolve(t2, builder);
+  const areTypeListsEqual = (l1: Type[], l2: Type[]): boolean => l1.length === l2.length && l1.every((t, i) => areTypesEqual(t, l2[i]!, builder));
   if (t1 === t2) return true;
   if (t1 instanceof UnknownType && t2 instanceof UnknownType) return t1.id === t2.id;
   if (t1 instanceof TypeVariable && t2 instanceof TypeVariable) return t1.name === t2.name;
   if (t1 instanceof PrimitiveType && t2 instanceof PrimitiveType) return t1.name === t2.name;
-  if (t1 instanceof ArrowNType && t2 instanceof ArrowNType) return areTypeListsEqual(t1.params, t2.params) && areTypesEqual(t1.result, t2.result);
+  if (t1 instanceof ArrowNType && t2 instanceof ArrowNType) return areTypeListsEqual(t1.params, t2.params) && areTypesEqual(t1.result, t2.result, builder);
   if (t1 instanceof StructType && t2 instanceof StructType) return t1.name === t2.name && areTypeListsEqual(t1.fields.map(f => f.type), t2.fields.map(f => f.type));
   if (t1 instanceof AppliedType && t2 instanceof AppliedType) return t1.ctor === t2.ctor && areTypeListsEqual(t1.args, t2.args);
   if (t1 instanceof TypeParameterDecl && t2 instanceof TypeParameterDecl) return t1.name === t2.name && areTypeListsEqual(t1.constraints, t2.constraints);
@@ -245,14 +459,14 @@ const isAppliedType = (t: Type): t is AppliedType => t instanceof AppliedType;
 const isType = (t: RunResult): t is Type => t instanceof TypeRoot;
 
 // Helper functions for creating types
-const newUnknown = (): UnknownType => new UnknownType(nextU++);
+const newUnknown = (b: ProgramBuilder): UnknownType => new UnknownType(b.nextU++);
 const tvar = (name: string): TypeVariable => new TypeVariable(name);
 const tapp = (scheme: Scheme, args: Type[]): AppliedType => new AppliedType(scheme.name, scheme.id, args);
 const tstruct = (name: string, fields: { name: string; type: Type }[]): StructType => new StructType(name, fields);
 const arrow = (param: Type, result: Type): ArrowNType => new ArrowNType([param], result);
 const arrowN = (params: Type[], result: Type): ArrowNType => new ArrowNType(params, result);
 const overload = (alts: ArrowNType[]): OverloadType => new OverloadType(alts);
-const scheme = (name: string, id: number, vars: string[], body: Type): Scheme => ({ name, id, vars, body });
+const scheme = (name: string, id: number, vars: string[], body: Type, bounds?: Bound[]): Scheme => ({ name, id, vars, body, bounds });
 
 // Primitive type constants (aligning with defs.ts)
 export const IntType = new PrimitiveType("Int");
@@ -360,9 +574,6 @@ export type Node =
   | { location: Loc; kind: "Return"; exprIndex: number }
   | { location: Loc; kind: "LetConst"; name: string; valueIndex: number }
 
-let nextSchemeId = 0;
-const getNextSchemeId = () => nextSchemeId++;
-
 
 class Application {
   schemeId!: number
@@ -381,16 +592,63 @@ class Instantiation {
 }
 
 
+
+export class ProgramBuilder {
+  // Building-time state
+  public nodes: Node[] = [];
+  public types: Type[] = [];
+  public schemes: Map<number, Scheme> = new Map();
+  public apps: Map<number, Application> = new Map();
+  public instantiations: Instantiation[] = [];
+  public program?: Program;
+
+  // Type inference state (needed during building)
+  public solved: Map<number, Type> = new Map();
+  public trail: Array<{u: UnknownType; prev: Type | undefined}> = [];
+  public nextU: number = 0;
+  public nextSchemeId: number = 0;
+  
+  // Constraint system state (needed during building)
+  public traitTable: Map<number, Trait> = new Map();
+  public traitImpls: Map<string, true> = new Map();
+  public pendingObligations: Obligation[] = [];
+  public activeTraitBounds: Map<string, Set<number>> = new Map();
+  
+  // Primitive subtyping (needed during building)
+  public primLe: Record<string, string[]> = {
+    Int: ["Int", "Float"],
+    Float: ["Float"],
+    Bool: ["Bool"],
+    Unit: ["Unit"],
+  };
+
+  constructor() {}
+
+  // Simple helper method for adding nodes
+  addNode(node: Node): number {
+    const index = this.nodes.length;
+    this.nodes.push(node);
+    return index;
+  }
+
+  scheme(name: string, vars: string[], body: Type, bounds?: Bound[]): Scheme {
+    const id = this.nextSchemeId++;
+    return { name, id, vars, body, bounds };
+  }
+}
+
+const getNextSchemeId = (b: ProgramBuilder) => b.nextSchemeId++;
+
+
 // Program class to hold the indexed arrays
 export class Program {
-  public schemes: Map<number, Scheme> = new Map();
-  public apps: Map<number, Application> = new Map(); // nodeIdx -> Application
-  public instantiations: Instantiation[] = [];
-  
   constructor(
-    public nodes: Node[],
-    public types: Type[],
-    public rootIndex: number
+    public readonly nodes: Node[],
+    public readonly types: Type[],
+    public readonly rootIndex: number,
+    public readonly schemes: Map<number, Scheme>,
+    public readonly apps: Map<number, Application>,
+    public readonly instantiations: Instantiation[]
   ) {}
 
   // Helper methods to work with the indexed structure
@@ -412,12 +670,13 @@ export class Program {
     return type;
   }
 
-  addNode(node: Node): number {
-    const index = this.nodes.length;
-    this.nodes.push(node);
-    return index;
+  getScheme(id: number): Scheme | undefined {
+    return this.schemes.get(id);
   }
 
+  getApp(nodeIdx: number): Application | undefined {
+    return this.apps.get(nodeIdx);
+  }
 }
 
 // Helper functions to create nodes
@@ -439,28 +698,28 @@ const nodeFac = {
 //======================================================================
 
 
-const solved = new Map<number, Type>();
-
-// Trial/rollback system
-const trail: Array<{u: UnknownType; prev: Type | undefined}> = [];
-
-function startTrial(): number {
-  return trail.length;
+function startTrial(builder: ProgramBuilder): number {
+  const trailArray = builder.trail;
+  return trailArray.length;
 }
 
-function rollback(mark: number): void {
-  while (trail.length > mark) {
-    const { u, prev } = trail.pop()!;
+function rollback(mark: number, builder: ProgramBuilder): void {
+  const trailArray = builder.trail;
+  const solvedMap = builder.solved;
+  
+  while (trailArray.length > mark) {
+    const { u, prev } = trailArray.pop()!;
     if (prev === undefined) {
-      solved.delete(u.id);
+      solvedMap.delete(u.id);
     } else {
-      solved.set(u.id, prev);
+      solvedMap.set(u.id, prev);
     }
   }
 }
 
-function commit(mark: number): void {
-  trail.length = mark;
+function commit(mark: number, builder: ProgramBuilder): void {
+  const trailArray = builder.trail;
+  trailArray.length = mark;
 }
 
 const primLe: Record<string, string[]> = {
@@ -473,31 +732,69 @@ const primLe: Record<string, string[]> = {
 const primSubtype = (a: PrimitiveType, b: PrimitiveType): boolean => 
   a === b || (primLe[a.name]?.includes(b.name) ?? false);
 
-const resolve = (t: Type): Type =>
-  isUnknown(t) && solved.has(t.id) ? resolve(solved.get(t.id)!) : t;
+// Simple resolve - only resolves root-level unknowns
+const resolve = (t: Type, builder: ProgramBuilder): Type => {
+  const solvedMap = builder.solved;
+  
+  if (isUnknown(t) && solvedMap.has(t.id)) {
+    return resolve(solvedMap.get(t.id)!, builder);
+  }
+  
+  return t;
+};
 
-function occurs(u: UnknownType, t: Type): boolean {
-  t = resolve(t);
+// Deep resolve - recursively resolves unknowns within compound types
+const resolveRecursive = (t: Type, builder: ProgramBuilder): Type => {
+  const solvedMap = builder.solved;
+  
+  if (isUnknown(t) && solvedMap.has(t.id)) {
+    return resolveRecursive(solvedMap.get(t.id)!, builder);
+  }
+  
+  // Recursively resolve compound types
+  if (isArrowN(t)) {
+    const resolvedParams = t.params.map(p => resolveRecursive(p, builder));
+    const resolvedResult = resolveRecursive(t.result, builder);
+    return arrowN(resolvedParams, resolvedResult);
+  }
+  
+  if (isOverload(t)) {
+    return overload(t.alts.map(alt => resolveRecursive(alt, builder) as ArrowNType));
+  }
+  
+  if (isTApp(t)) {
+    return new AppliedType(t.ctor, t.schemeId, t.args.map(arg => resolveRecursive(arg, builder)));
+  }
+  
+  if (isStructType(t)) {
+    return tstruct(t.name, t.fields.map(f => ({ name: f.name, type: resolveRecursive(f.type, builder) })));
+  }
+  
+  return t;
+};
+
+function occurs(u: UnknownType, t: Type, b: ProgramBuilder): boolean {
+  t = resolve(t, b);
   if (t === u) return true;
-  if (isArrowN(t)) return t.params.some(p => occurs(u, p)) || occurs(u, t.result);
+  if (isArrowN(t)) return t.params.some(p => occurs(u, p, b)) || occurs(u, t.result, b);
   if (isOverload(t)) return t.alts.some(alt => {
-    if (isArrowN(alt)) return alt.params.some(p => occurs(u, p)) || occurs(u, alt.result);
+    if (isArrowN(alt)) return alt.params.some(p => occurs(u, p, b)) || occurs(u, alt.result, b);
     return false;
   });
-  if (isTApp(t)) return t.args.some(arg => occurs(u, arg));
+  if (isTApp(t)) return t.args.some(arg => occurs(u, arg, b));
   return false;
 }
 
 
-const unify = Result.wrap((a: Type, b: Type, record: boolean = true) => {
-  a = resolve(a); b = resolve(b);
+const unify = Result.wrap((a: Type, b: Type, record: boolean = true, builder: ProgramBuilder) => {
+  a = resolve(a, builder); b = resolve(b, builder);
   if (a === b) return;
 
   if (isUnknown(a)) {
-    if (occurs(a, b)) throw new Error(`infinite type in ${show(b)}`);
-    bindUnknown(a, b, record); return;
+    if (occurs(a, b, builder)) throw new Error(`infinite type in ${show(b, builder)}`);
+    bindUnknown(a, b, record, builder); return;
   }
-  if (isUnknown(b)) { return unify(b, a, record); }
+  if (isUnknown(b)) { return unify(b, a, record, builder); }
 
   // Rigid TVars – rule: α unifies only with α
   if (isTVar(a) && isTVar(b)) {
@@ -511,15 +808,15 @@ const unify = Result.wrap((a: Type, b: Type, record: boolean = true) => {
   if (isArrowN(a) && isArrowN(b)) {
     assert(a.params.length === b.params.length, "cannot unify ArrowN with different numbers of parameters", { a, b })
     for (let i = 0; i < a.params.length; i++) {
-      unify(a.params[i]!, b.params[i]!, record).getOrThrow()
+      unify(a.params[i]!, b.params[i]!, record, builder).getOrThrow()
     }
-    unify(a.result, b.result, record).getOrThrow()
+    unify(a.result, b.result, record, builder).getOrThrow()
     return;
   }
   if (isOverload(a) && isOverload(b)) {
     assert(a.alts.length === b.alts.length, "cannot unify overloads with different numbers of alternatives", { a, b })
     for (let i = 0; i < a.alts.length; i++) {
-      unify(a.alts[i]!, b.alts[i]!, record).getOrThrow()
+      unify(a.alts[i]!, b.alts[i]!, record, builder).getOrThrow()
     }
     return;
   }
@@ -527,7 +824,7 @@ const unify = Result.wrap((a: Type, b: Type, record: boolean = true) => {
     assert(a.ctor === b.ctor, "cannot unify type applications with different constructors", { a, b })
     assert(a.args.length === b.args.length, "cannot unify type applications with different numbers of arguments", { a, b })
     for (let i = 0; i < a.args.length; i++) {
-      unify(a.args[i]!, b.args[i]!, record).getOrThrow()
+      unify(a.args[i]!, b.args[i]!, record, builder).getOrThrow()
     }
     return;
   }
@@ -536,13 +833,13 @@ const unify = Result.wrap((a: Type, b: Type, record: boolean = true) => {
 }, handleAssertionOrThrow);
 
 /** returns true and may bind unknowns  */
-const subsume = Result.wrap((a: Type, b: Type, record: boolean = true) => {
-  a = resolve(a);  b = resolve(b);
+const subsume = Result.wrap((a: Type, b: Type, record: boolean = true, builder: ProgramBuilder) => {
+  a = resolve(a, builder);  b = resolve(b, builder);
   if (a === b) return;
 
   // unknowns behave like Algorithm W instantiation / generalisation
-  if (isUnknown(a)) { bindUnknown(a, b, record); return; }
-  if (isUnknown(b)) { bindUnknown(b, a, record); return; }
+  if (isUnknown(a)) { bindUnknown(a, b, record, builder); return; }
+  if (isUnknown(b)) { bindUnknown(b, a, record, builder); return; }
 
   // primitive widening
   if (isPrimitive(a) && isPrimitive(b) && primSubtype(a, b)) return;
@@ -557,9 +854,9 @@ const subsume = Result.wrap((a: Type, b: Type, record: boolean = true) => {
   if (isArrowN(a) && isArrowN(b)) {
     assert(a.params.length === b.params.length, "cannot subsume ArrowN with different numbers of parameters", { a, b })
     for (let i = 0; i < a.params.length; i++) {
-      subsume(a.params[i]!, b.params[i]!, record).getOrThrow()
+      subsume(a.params[i]!, b.params[i]!, record, builder).getOrThrow()
     }
-    subsume(a.result, b.result, record).getOrThrow()
+    subsume(a.result, b.result, record, builder).getOrThrow()
     return;
   }
 
@@ -568,7 +865,7 @@ const subsume = Result.wrap((a: Type, b: Type, record: boolean = true) => {
     assert(a.ctor === b.ctor, "cannot subsume type applications with different constructors", { a, b })
     assert(a.args.length === b.args.length, "cannot subsume type applications with different numbers of arguments", { a, b })
     for (let i = 0; i < a.args.length; i++) {
-      subsume(a.args[i]!, b.args[i]!, record).getOrThrow()
+      subsume(a.args[i]!, b.args[i]!, record, builder).getOrThrow()
     }
     return;
   }
@@ -578,7 +875,7 @@ const subsume = Result.wrap((a: Type, b: Type, record: boolean = true) => {
     for (const altA of a.alts) {
       let foundMatch = false;
       for (const altB of b.alts) {
-        if (subsume(altA, altB, record).ok) {
+        if (subsume(altA, altB, record, builder).ok) {
           foundMatch = true;
           break;
         }
@@ -591,12 +888,12 @@ const subsume = Result.wrap((a: Type, b: Type, record: boolean = true) => {
   assert(false, "type a is not a subtype of b", { a, b })
 }, handleAssertionOrThrow);
 
-function bindUnknown(u: UnknownType, t: Type, record: boolean = true) {
-  if (occurs(u,t))   // reuse the occurs-check we already had
-    throw new Error(`infinite type: ${show(u)} in ${show(t)}`);
+function bindUnknown(u: UnknownType, t: Type, record: boolean = true, builder: ProgramBuilder) {
+  if (occurs(u,t, builder))   // reuse the occurs-check we already had
+    throw new Error(`infinite type: ${show(u, builder)} in ${show(t, builder)}`);
   
-  if (record) trail.push({ u, prev: solved.get(u.id) });
-  solved.set(u.id, t);
+  if (record) builder.trail.push({ u, prev: builder.solved.get(u.id) });
+  builder.solved.set(u.id, t);
 }
 
 
@@ -607,10 +904,13 @@ function appliedSchemeOrType(state: InterpreterState, nodeIdx: number, t: Type |
 
 // Instantiate a scheme with fresh unknowns
 function applySchemeUnknowns(state: InterpreterState, nodeIdx: number, s: Scheme): Type {
-  const actualArgs = s.vars.map(v => newUnknown());
+  const actualArgs = s.vars.map(v => newUnknown(state.builder));
   const t = tapp(s, actualArgs);
-  state.program?.instantiations.push({ schemeId: s.id, args: actualArgs, mono: t, nodeIdx });
-  state.program?.schemes.set(s.id, s);
+  const instKey = canonicalKey(s.id, actualArgs, state.builder);
+  state.builder.instantiations.push({ schemeId: s.id, args: actualArgs, mono: t, nodeIdx });
+  state.builder.schemes.set(s.id, s);
+  // Emit obligations (may defer)
+  emitObligationsForInstantiation(s, actualArgs, dummy, instKey, state.builder);
   return t;
 }
 
@@ -618,55 +918,30 @@ function concreteInstantiateWithArgs(state: InterpreterState, s: Scheme, args: T
   assert(args.length === s.vars.length, "arity mismatch for scheme", { s, args });
   const subst = new Map<string, Type>();
   s.vars.forEach((v, i) => subst.set(v, args[i]!));
-
-  // Substitution function for type variables
-  function substWalk(t: Type, subst: Map<string, Type>): Type {
-    if (isTVar(t)) {
-      const replacement = subst.get(t.name);
-      return replacement ? replacement : t;
-    }
-    if (isArrowN(t)) {
-      return arrowN(t.params.map(p => substWalk(p, subst)), substWalk(t.result, subst));
-    }
-    if (isOverload(t)) {
-      return overload(t.alts.map(alt => {
-        return arrowN(alt.params.map(p => substWalk(p, subst)), substWalk(alt.result, subst));
-      }));
-    }
-    if (isTApp(t)) {
-      const scheme = state.program?.schemes.get(t.schemeId);
-      assert(scheme, "scheme not found", { t });
-      return tapp(scheme, t.args.map(arg => substWalk(arg, subst)));
-    }
-
-    // A bare struct type will have no substitutions
-    if (isStructType(t)) return t
-
-    assert(false, "unexpected type", { t, s });
-    return t;
-  }
-
   return substWalk(s.body, subst);
 }
 
 function instantiateWithArgs(state: InterpreterState, nodeIdx: number, s: Scheme, args: Type[]): Type {
   assert(args.length === s.vars.length, "arity mismatch for scheme", { s, args });
   const t = tapp(s, args);
+  const instKey = canonicalKey(s.id, args, state.builder);
   state.program?.instantiations.push({ schemeId: s.id, args, mono: t, nodeIdx });
   state.program?.schemes.set(s.id, s);
+  // Emit obligations (may defer)
+  emitObligationsForInstantiation(s, args, dummy, instKey, state.builder);
   return t;
 }
 
 
-function show(t: Type): string {
-  t = resolve(t);
+function show(t: Type, b: ProgramBuilder | null): string {
+  if (b) t = resolve(t, b);
   if (isUnknown(t))  return `?${t.id}`;
   if (isTVar(t)) return t.name;
   if (isPrimitive(t)) return t.name;
-  if (isTApp(t)) return `${t.ctor}<${t.args.map(show).join(", ")}>`;
-  if (isArrowN(t)) return `(${t.params.map(show).join(", ")} → ${show(t.result)})`;
-  if (isStructType(t)) return `${t.name}{${t.fields.map(f => `${f.name}: ${show(f.type)}`).join(", ")}}`;
-  if (isOverload(t)) return `{${t.alts.map(show).join(" | ")}}`;
+  if (isTApp(t)) return `${t.ctor}<${t.args.map(a => show(a, b)).join(", ")}>`;
+  if (isArrowN(t)) return `(${t.params.map(a => show(a, b)).join(", ")} → ${show(t.result, b)})`;
+  if (isStructType(t)) return `${t.name}{${t.fields.map(f => `${f.name}: ${show(f.type, b)}`).join(", ")}}`;
+  if (isOverload(t)) return `{${t.alts.map(a => show(a, b)).join(" | ")}}`;
   assert(false, "unexpected type", { name: (t as any).constructor?.name });
 }
 
@@ -675,26 +950,26 @@ function show(t: Type): string {
 /*======================================================================*/
 
 // Try to subsume a with b, return true if successful, false otherwise
-function trySubsume(a: Type, b: Type): boolean {
-  const mark = startTrial();
-  const result = subsume(a, b, true);
-  rollback(mark);
+function trySubsume(a: Type, b: Type, builder: ProgramBuilder): boolean {
+  const mark = startTrial(builder);
+  const result = subsume(a, b, true, builder);
+  rollback(mark, builder);
   return result.ok;
 }
 
 // Check if a is a strict subtype of b (a < b)
-function isStrictSubtype(a: Type, b: Type): boolean {
-  const mark = startTrial();
-  const result = subsume(a, b, true);
+function isStrictSubtype(a: Type, b: Type, builder: ProgramBuilder): boolean {
+  const mark = startTrial(builder);
+  const result = subsume(a, b, true, builder);
   if (!result.ok) {
-    rollback(mark);
+    rollback(mark, builder);
     return false;
   }
   // Check if they're actually different (not equal)
-  const aResolved = resolve(a);
-  const bResolved = resolve(b);
-  const areEqual = areTypesEqual(aResolved, bResolved);
-  rollback(mark);
+  const aResolved = resolve(a, builder);
+  const bResolved = resolve(b, builder);
+  const areEqual = areTypesEqual(aResolved, bResolved, builder);
+  rollback(mark, builder);
   return !areEqual;
 }
 
@@ -722,34 +997,34 @@ type Instr =
   | { op:"resolveTypeAnnotation"; annotation:string; nodeIdx:number; loc:Loc }
   | { op:"dup"         ; loc:Loc }
   | { op:"storeType"   ; nodeIdx:number    ; loc:Loc }
-  | { op:"storeApp"    ; nodeIdx:number    ; loc:Loc };
+  | { op:"storeApp"    ; nodeIdx:number    ; loc:Loc }
+  | { op:"unknown"     ; loc:Loc };
 
 // Helper function to convert Expr to Program
-function exprToProgram(expr: Expr): Program {
-  const program = new Program([], [], 0);
-  
+function exprToProgram(expr: Expr, builder: ProgramBuilder): Program {
   function convertExpr(e: Expr): number {
+    assert(builder, "builder is required");
     switch(e.tag) {
       case "IntLit":
-        return program.addNode(nodeFac.intLiteral(e.value, e.loc));
+        return builder.addNode(nodeFac.intLiteral(e.value, e.loc));
       
       case "BoolLit":
-        return program.addNode(nodeFac.boolLiteral(e.value, e.loc));
+        return builder.addNode(nodeFac.boolLiteral(e.value, e.loc));
       
       case "Var":
-        return program.addNode(nodeFac.var(e.name, e.loc));
+        return builder.addNode(nodeFac.var(e.name, e.loc));
       
       case "AppN": {
         const fnIndex = convertExpr(e.fn);
         const argsIndices = e.args.map(convertExpr);
-        return program.addNode(nodeFac.app(fnIndex, argsIndices, [], e.loc));
+        return builder.addNode(nodeFac.app(fnIndex, argsIndices, [], e.loc));
       }
       
       case "If": {
         const condIndex = convertExpr(e.cond);
         const thenIndex = convertExpr(e.thenBranch);
         const elseIndex = convertExpr(e.elseBranch);
-        return program.addNode(nodeFac.if(condIndex, thenIndex, elseIndex, e.loc));
+        return builder.addNode(nodeFac.if(condIndex, thenIndex, elseIndex, e.loc));
       }
       
       case "Let": {
@@ -759,12 +1034,12 @@ function exprToProgram(expr: Expr): Program {
         if (e.annotation !== null) {
           ann = convertExpr(e.annotation);
         }
-        return program.addNode(nodeFac.let(e.name, valueIndex, ann, e.loc));
+        return builder.addNode(nodeFac.let(e.name, valueIndex, ann, e.loc));
       }
       
       case "Seq": {
         const statementsIndices = e.stmts.map(convertExpr);
-        return program.addNode(nodeFac.statements(statementsIndices, e.loc));
+        return builder.addNode(nodeFac.statements(statementsIndices, e.loc));
       }
       
       case "Lam": {
@@ -772,12 +1047,12 @@ function exprToProgram(expr: Expr): Program {
         const paramIndices: number[] = [];
         
         for (let i = 0; i < e.params.length; i++) {
-          const paramIndex = program.addNode(nodeFac.funParam(e.params[i]!, -1, e.loc));
+          const paramIndex = builder.addNode(nodeFac.funParam(e.params[i]!, -1, e.loc));
           paramIndices.push(paramIndex);
         }
         
         const bodyIndex = convertExpr(e.body);
-        return program.addNode(nodeFac.funDecl("", paramIndices, [], 0, bodyIndex, e.loc));
+        return builder.addNode(nodeFac.funDecl("", paramIndices, [], 0, bodyIndex, e.loc));
       }
       
       case "FunDecl": {
@@ -787,7 +1062,7 @@ function exprToProgram(expr: Expr): Program {
         // Add type parameters
         const typeParamIndices: number[] = [];
         for (const typeParam of e.typeParams) {
-          const typeParamIndex = program.addNode({ 
+          const typeParamIndex = builder.addNode({ 
             location: e.loc, 
             kind: "TypeParam", 
             name: typeParam, 
@@ -798,26 +1073,25 @@ function exprToProgram(expr: Expr): Program {
 
         // Add function parameters
         for (let i = 0; i < e.params.length; i++) {
-          const typeIndex = e.paramTypes?.[i] ? program.addNode(nodeFac.var(e.paramTypes[i]!)) : -1;
-          const paramIndex = program.addNode(nodeFac.funParam(e.params[i]!, typeIndex, e.loc));
+          const typeIndex = e.paramTypes?.[i] ? builder.addNode(nodeFac.var(e.paramTypes[i]!)) : -1;
+          const paramIndex = builder.addNode(nodeFac.funParam(e.params[i]!, typeIndex, e.loc));
           paramIndices.push(paramIndex);
         }
         
         const bodyIndex = convertExpr(e.body);
-        const funDeclIndex = program.addNode(nodeFac.funDecl(e.name, paramIndices, typeParamIndices, 0, bodyIndex, e.loc));
+        const funDeclIndex = builder.addNode(nodeFac.funDecl(e.name, paramIndices, typeParamIndices, 0, bodyIndex, e.loc));
         
         // Create a scheme for the generic function and bind it to the environment
         const typeVars = e.typeParams.map(tvar);
-        const paramTypes = e.params.map(() => newUnknown()); // Unknown types for parameters
-        const bodyType = newUnknown(); // Unknown type for body
+        const paramTypes = e.params.map(() => newUnknown(builder)); // Unknown types for parameters
+        const bodyType = newUnknown(builder); // Unknown type for body
         const funType = arrowN(paramTypes, bodyType);
-        const scheme_ = scheme(e.name, getNextSchemeId(), e.typeParams, funType);
+        const scheme_ = builder.scheme(e.name, e.typeParams, funType);
 
         console.log("scheme for ", e.name, scheme_);
         
-        // Store the scheme in the program for later binding
-        program.schemes = program.schemes || new Map();
-        program.schemes.set(scheme_.id, scheme_);
+        // Store the scheme in the builder for later binding
+        builder.schemes.set(scheme_.id, scheme_);
         
         return funDeclIndex;
       }
@@ -825,7 +1099,7 @@ function exprToProgram(expr: Expr): Program {
       case "TypeApp": {
         const ctorIndex = convertExpr(e.ctor);
         const argsIndices = e.args.map(convertExpr);
-        return program.addNode(nodeFac.typeApp(ctorIndex, argsIndices, e.loc));
+        return builder.addNode(nodeFac.typeApp(ctorIndex, argsIndices, e.loc));
       }
 
       default: {
@@ -836,8 +1110,9 @@ function exprToProgram(expr: Expr): Program {
   }
   
   const rootIndex = convertExpr(expr);
-  program.rootIndex = rootIndex;
-  program.types = new Array(program.nodes.length).fill(null);
+  builder.types = new Array(builder.nodes.length).fill(null);
+  const program = new Program(builder.nodes, builder.types, rootIndex, builder.schemes, builder.apps, builder.instantiations);
+  builder.program = program;
   return program;
 }
 
@@ -847,7 +1122,7 @@ function exprToProgram(expr: Expr): Program {
 
 // Unified lineariseType function that handles both type parameters and type annotations
 const lineariseType = (program: Program, code: Instr[], nodeIdx: number, loc: Loc) => {
-  if (nodeIdx === -1) return code.push({op:"pushType", ty:newUnknown(), loc});
+  if (nodeIdx === -1) return code.push({op:"unknown", loc});
   
   const node = program.getNode(nodeIdx);
   
@@ -868,14 +1143,17 @@ const lineariseType = (program: Program, code: Instr[], nodeIdx: number, loc: Lo
 };
 
 // Modified lineariser to work with Program
-function lineariseProgram(program: Program, nodeIdx: number, mode: "synth" | "check" = "synth", expect?: Type): Instr[] {
+function lineariseProgram(builder: ProgramBuilder, nodeIdx: number, mode: "synth" | "check" = "synth", expect?: Type): Instr[] {
+  const program = builder.program;
+  assert(program, "Program is required");
+
   const code: Instr[] = [];
   const node = program.getNode(nodeIdx);
   
-  const synth = (index: number) => code.push(...lineariseProgram(program, index, "synth"));
+  const synth = (index: number) => code.push(...lineariseProgram(builder, index, "synth"));
   const checkM = (index: number, t: Type) => code.push(
     {op:"pushExpect", ty: t, loc: node.location},
-    ...lineariseProgram(program, index, "synth"),
+    ...lineariseProgram(builder, index, "synth"),
     {op:"popExpect", loc: node.location});
 
   switch(node.kind) {
@@ -920,7 +1198,7 @@ function lineariseProgram(program: Program, nodeIdx: number, mode: "synth" | "ch
       const typeParams: Record<string, Type> = {};
       let scheme_: Scheme | undefined;
       if (node.typeParamsIndices.length) {
-        scheme_ = scheme(node.name, getNextSchemeId(), [], null!);
+        scheme_ = builder.scheme(node.name, [], null!);
         program.schemes.set(scheme_.id, scheme_);
 
         for (const typeParamIndex of node.typeParamsIndices) {
@@ -1000,7 +1278,7 @@ function lineariseProgram(program: Program, nodeIdx: number, mode: "synth" | "ch
         synth(node.statementsIndices[i]!);
         code.push({op:"pop",loc:node.location});
       }
-      code.push(...lineariseProgram(program, node.statementsIndices[n-1]!, mode, expect));
+      code.push(...lineariseProgram(builder, node.statementsIndices[n-1]!, mode, expect));
       code.push({op:"storeType",nodeIdx:nodeIdx,loc:node.location});
       break;
     }
@@ -1045,18 +1323,20 @@ type InterpreterState = {
   expectStk: Type[];
   envStk: Env[];
   program?: Program; // Optional program reference for storeType instruction
+  builder: ProgramBuilder; // Builder for accessing type inference state
 }
-const createInterpreterState = (code: Instr[], initialEnv: Env, program?: Program): InterpreterState => ({ 
+const createInterpreterState = (code: Instr[], initialEnv: Env, builder: ProgramBuilder, program?: Program): InterpreterState => ({ 
   code, 
   pc: 0, 
   typeStk: [], 
   expectStk: [], 
   envStk: [initialEnv],
-  program
+  program,
+  builder
 });
 
 
-const getOverloadMatch = (alts: ArrowNType[], argTys: Type[]): ArrowNType => {
+const getOverloadMatch = (alts: ArrowNType[], argTys: Type[], builder: ProgramBuilder): ArrowNType => {
   const arity = argTys.length;
   const exactMatches: ArrowNType[] = [];
   const allMatches: ArrowNType[] = [];
@@ -1066,8 +1346,8 @@ const getOverloadMatch = (alts: ArrowNType[], argTys: Type[]): ArrowNType => {
     // Check if all arguments match exactly without implicit casts
     let subtype = false;
     for (let j = 0; j < arity; j++) {
-      if (!trySubsume(argTys[j]!, alt.params[j]!)) return;
-      if (isStrictSubtype(argTys[j]!, alt.params[j]!)) subtype = true;
+      if (!trySubsume(argTys[j]!, alt.params[j]!, builder)) return;
+      if (isStrictSubtype(argTys[j]!, alt.params[j]!, builder)) subtype = true;
     }
     allMatches.push(alt);
     if (!subtype) exactMatches.push(alt);
@@ -1094,19 +1374,19 @@ const updateApp = (state: InterpreterState, nodeIdx: number, schemeId: number, f
 const applyN = (state: InterpreterState, nodeIdx: number, arity: number, fnTy: Type, argTys: Type[]): Type  => {
 
   if (isOverload(fnTy)) {
-    const match = getOverloadMatch(fnTy.alts, argTys);
+    const match = getOverloadMatch(fnTy.alts, argTys, state.builder);
     for (let j = 0; j < arity; j++) {
-      subsume(argTys[j]!, match.params[j]!, true).getOrThrow()
+      subsume(argTys[j]!, match.params[j]!, true, state.builder).getOrThrow()
     }
-    const res = resolve(match.result);
+    const res = resolve(match.result, state.builder);
     updateApp(state, nodeIdx, -1, match, argTys, res);
     return res;
   } else if (isArrowN(fnTy)) {
     assert(fnTy.params.length === arity, `function expects ${fnTy.params.length} arguments but got ${arity}`, { fnTy, arity });
     for (let j = 0; j < arity; j++) {
-      subsume(argTys[j]!, fnTy.params[j]!, true).getOrThrow()
+      subsume(argTys[j]!, fnTy.params[j]!, true, state.builder).getOrThrow()
     }
-    const res = resolve(fnTy.result);
+    const res = resolve(fnTy.result, state.builder);
     updateApp(state, nodeIdx, -1, fnTy, argTys, res);
     return res;
   } else if (isAppliedType(fnTy)) {
@@ -1246,7 +1526,7 @@ function runInternal(state: InterpreterState): RunResult {
         assert(i.nodeIdx >= 0, "Node index is negative");
         assert(i.nodeIdx < state.program.types.length, "Node index out of bounds", { nodeIdx: i.nodeIdx, typesLength: state.program.types.length });
         state.program.types[i.nodeIdx] = topType;
-        console.log(`Stored type ${show(topType)} at node index ${i.nodeIdx}`);
+        console.log(`Stored type ${show(topType, state.builder)} at node index ${i.nodeIdx}`);
         break;
       }
 
@@ -1261,7 +1541,7 @@ function runInternal(state: InterpreterState): RunResult {
 
       case "applyN": {
         const argTys = popN(i.arity);      // keep in array (last arg last)
-        const fnTy   = resolve(typeStk.pop()!);
+        const fnTy   = resolve(typeStk.pop()!, state.builder);
         const res = applyN(state, i.nodeIdx, i.arity, fnTy, argTys);
         typeStk.push(res);
         break;
@@ -1272,7 +1552,7 @@ function runInternal(state: InterpreterState): RunResult {
       case "popExpect":
         const got = typeStk[typeStk.length-1]!;
         const expect = expectStk.pop()!;
-        const result = subsume(got, expect, false);
+        const result = subsume(got, expect, false, state.builder);
         assert(result.ok, result.errorOrNull?.message ?? '', { result, got, expect });
         break;
 
@@ -1281,8 +1561,8 @@ function runInternal(state: InterpreterState): RunResult {
       case "join": {
         const b = typeStk.pop()!;
         const a = typeStk.pop()!;
-        unify(a,b, false).getOrThrow();
-        typeStk.push(resolve(a));
+        unify(a,b, false, state.builder).getOrThrow();
+        typeStk.push(resolve(a, state.builder));
         break;
       }
 
@@ -1290,6 +1570,11 @@ function runInternal(state: InterpreterState): RunResult {
         const argsTys = popN(i.arity);
         const res = lookupType(state, i.name, i.nodeIdx, i.loc, argsTys);
         typeStk.push(res);
+        break;
+      }
+
+      case "unknown": {
+        typeStk.push(newUnknown(state.builder));
         break;
       }
 
@@ -1302,11 +1587,30 @@ function runInternal(state: InterpreterState): RunResult {
     // console.log("typeStk =", typeStk.map(show).join(", "));
   }
   if (typeStk.length !== 1) {
-    console.log("typeStk =", typeStk.map(show).join(", "));
+    console.log("typeStk =", typeStk.map(t => show(t, state.builder)).join(", "));
     throw new Error("ill-typed program");
   }
-  const res = resolve(typeStk[0]!);
-  console.log("type =", show(res));
+  const res = resolve(typeStk[0]!, state.builder);
+  console.log("type =", show(res, state.builder));
+  
+  // Discharge any deferred obligations after type solving is complete
+  dischargeDeferredObligations(state);
+  
+  // Resolve all application data and instantiations after type solving is complete
+  if (state.program) {
+    for (const app of state.program.apps.values()) {
+      app.fn = resolveRecursive(app.fn, state.builder);
+      app.args = app.args.map(arg => resolveRecursive(arg, state.builder));
+      app.result = resolveRecursive(app.result, state.builder);
+    }
+    
+    // Also resolve instantiation data
+    for (const inst of state.program.instantiations) {
+      inst.args = inst.args.map(arg => resolveRecursive(arg, state.builder));
+      inst.mono = resolveRecursive(inst.mono, state.builder);
+    }
+  }
+  
   return res;
 }
 
@@ -1343,8 +1647,7 @@ export {
   unify,
   subsume,
   show,
-  trail,
-  solved,
+  resolveRecursive,
   tvar,
   tapp,
   tstruct,
@@ -1356,5 +1659,18 @@ export {
   compactInspect,
   funDecl,
   typeApp,
-  areTypesEqual
+  areTypesEqual,
+  // Type constraints system exports
+  typeKey,
+  requireTraitNow,
+  dischargeDeferredObligations,
+  emitObligationsForInstantiation,
+  tryCheckOrDefer,
+  substWalk,
+  containsUnknown,
+  canonicalKey,
+  fail,
+  registerTrait,
+  registerTraitImpl,
+  createBounds
 };
