@@ -195,6 +195,11 @@ export class AppliedType extends TypeRoot {
   toString() { return show(this, null) }
 }
 
+export class TraitType extends TypeRoot {
+  constructor(public name: string, public traitId: number) { super() }
+  toString() { return `Trait(${this.name})` }
+}
+
 // Type parameter declaration (aligning with defs.ts)
 export class TypeParameterDecl extends TypeRoot {
   constructor(public name: string, public constraints: Type[], public scopeId: string) { super() }
@@ -335,16 +340,15 @@ function substWalk(t: Type, subst: Map<string, Type>): Type {
       return arrowN(alt.params.map(p => substWalk(p, subst)), substWalk(alt.result, subst));
     }));
   }
-  if (isTApp(t)) {
-    // For AppliedType, just substitute the args
-    return new AppliedType(t.ctor, t.schemeId, t.args.map(arg => substWalk(arg, subst)));
-  }
   if (isStructType(t)) {
-    const struct = t as StructType;
-    return tstruct(struct.name, struct.fields.map(f => ({ name: f.name, type: substWalk(f.type, subst) })));
+    return tstruct(t.name, t.fields.map(f => ({ name: f.name, type: substWalk(f.type, subst) })));
   }
   if (isPrimitive(t)) {
     return t; // Primitive types are not substituted
+  }
+  if (isTApp(t)) {
+    // For AppliedType, just substitute the args
+    return new AppliedType(t.ctor, t.schemeId, t.args.map(arg => substWalk(arg, subst)));
   }
   // For any other type, return as-is
   return t;
@@ -374,7 +378,7 @@ function dischargeDeferredObligations(state: InterpreterState) {
   for (const ob of b.pendingObligations) {
     if (ob.kind === "Trait") {
       const t = resolve(ob.ty, b);
-      if (!hasTrait(t, ob.traitId, b)) {
+      if (!isUnknown(t) && !hasTrait(t, ob.traitId, b)) {
         const traitName = b.traitTable.get(ob.traitId)?.name || `trait_${ob.traitId}`;
         fail(ob.loc, `type ${show(t, b)} does not implement ${traitName}`);
       }
@@ -429,6 +433,7 @@ export type Type =
   | AppliedType
   | StructType
   | TypeParameterDecl
+  | TraitType
 
 const areTypesEqual = (t1: Type, t2: Type, builder: ProgramBuilder): boolean => {
   t1 = resolve(t1, builder);
@@ -442,6 +447,7 @@ const areTypesEqual = (t1: Type, t2: Type, builder: ProgramBuilder): boolean => 
   if (t1 instanceof StructType && t2 instanceof StructType) return t1.name === t2.name && areTypeListsEqual(t1.fields.map(f => f.type), t2.fields.map(f => f.type));
   if (t1 instanceof AppliedType && t2 instanceof AppliedType) return t1.ctor === t2.ctor && areTypeListsEqual(t1.args, t2.args);
   if (t1 instanceof TypeParameterDecl && t2 instanceof TypeParameterDecl) return t1.name === t2.name && areTypeListsEqual(t1.constraints, t2.constraints);
+  if (t1 instanceof TraitType && t2 instanceof TraitType) return t1.traitId === t2.traitId;
   return false;
 }
 
@@ -449,6 +455,7 @@ const areTypesEqual = (t1: Type, t2: Type, builder: ProgramBuilder): boolean => 
 const isUnknown = (t: Type): t is UnknownType => t instanceof UnknownType;
 const isArrowN = (t: Type): t is ArrowNType => t instanceof ArrowNType;
 const isOverload = (t: Type): t is OverloadType => t instanceof OverloadType;
+const isTraitType = (t: Type): t is TraitType => t instanceof TraitType;
 const isTVar = (t: Type): t is TypeVariable => t instanceof TypeVariable;
 const isTApp = (t: Type): t is AppliedType => t instanceof AppliedType;
 const isPrimitive = (t: Type): t is PrimitiveType => t instanceof PrimitiveType;
@@ -510,7 +517,9 @@ interface Lam     { tag: "Lam"    ; loc: Loc;
                     params: string[]; paramTyNames?: string[]; body: Expr }
 interface FunDecl { tag: "FunDecl"; loc: Loc; name: string; 
                     typeParams: string[]; params: string[]; 
-                    paramTypes?: string[]; returnType?: string; body: Expr }
+                    paramTypes?: string[]; returnType?: string; body: Expr;
+                    traitBounds?: [string, Expr][];
+                    subtypeBounds?: [string, Expr][] }
 interface AppN    { tag: "AppN"   ; loc: Loc; fn: Expr; args: Expr[] }
 interface If      { tag: "If"     ; loc: Loc; cond: Expr; thenBranch: Expr;
                     elseBranch: Expr }
@@ -529,8 +538,8 @@ const lam = (p: string, body: Expr, anno?: string, l = dummy): Lam =>
   ({ tag: "Lam", loc: l, params: [p], paramTyNames: anno ? [anno] : undefined, body });
 const lamN = (params: string[], body: Expr, paramTyNames?: string[], l = dummy): Lam => 
   ({ tag: "Lam", loc: l, params, paramTyNames, body });
-const funDecl = (name: string, typeParams: string[], params: string[], body: Expr, paramTypes?: string[], returnType?: string, l = dummy): FunDecl => 
-  ({ tag: "FunDecl", loc: l, name, typeParams, params, paramTypes, returnType, body });
+const funDecl = (name: string, typeParams: string[], params: string[], body: Expr, paramTypes?: string[], returnType?: string, traitBounds?: [string, Expr][], subtypeBounds?: [string, Expr][], l = dummy): FunDecl => 
+  ({ tag: "FunDecl", loc: l, name, typeParams, params, paramTypes, returnType, body, traitBounds, subtypeBounds });
 const app = (f: Expr, a: Expr, l = dummy): AppN => ({ tag: "AppN", loc: l, fn: f, args: [a] });
 const appN = (f: Expr, args: Expr[], l = dummy): AppN => ({ tag: "AppN", loc: l, fn: f, args });
 const _if = (c: Expr, t: Expr, e: Expr, l = dummy): If => 
@@ -558,7 +567,7 @@ export type Node =
   | { location: Loc; kind: "Statements"; statementsIndices: number[]; }
   | { location: Loc; kind: "FunParam"; name: string; typeIndex: number; }
   | { location: Loc; kind: "Annotation"; name: string; innerIndex: number; }
-  | { location: Loc; kind: "FunDecl"; name: string; paramsIndices: number[]; typeParamsIndices: number[]; returnTypeIndex: number; bodyIndex: number; }
+  | { location: Loc; kind: "FunDecl"; name: string; paramsIndices: number[]; typeParamsIndices: number[]; returnTypeIndex: number; bodyIndex: number; traitBounds?: [string, number][]; subtypeBounds?: [string, number][] }
   | { location: Loc; kind: "StructDecl"; name: string; typeParamsIndices: number[]; fields: { name: string; typeIndex: number }[]; }
   | { location: Loc; kind: "StructLiteral"; name: string; typeArgsIndices: number[]; argIndices: number[]; }
   | { location: Loc; kind: "FieldAccess"; objectIndex: number; field: string; }
@@ -685,7 +694,7 @@ const nodeFac = {
   boolLiteral: (value: boolean, loc: Loc = dummy): Node => ({ location: loc, kind: "BoolLiteral",  value }),
   var: (name: string, loc: Loc = dummy): Node => ({ location: loc, kind: "Var", name }),
   app: (fnIndex: number, argsIndices: number[], typeArgsIndices: number[] = [], loc: Loc = dummy): Node => ({ location: loc, kind: "App", fnIndex, argsIndices, typeArgsIndices }),
-  funDecl: (name: string, paramsIndices: number[], typeParamsIndices: number[], returnTypeIndex: number, bodyIndex: number, loc: Loc = dummy): Node => ({ location: loc, kind: "FunDecl", name, paramsIndices, typeParamsIndices, returnTypeIndex, bodyIndex }),
+  funDecl: (name: string, paramsIndices: number[], typeParamsIndices: number[], returnTypeIndex: number, bodyIndex: number, traitBounds?: [string, number][], subtypeBounds?: [string, number][], loc: Loc = dummy): Node => ({ location: loc, kind: "FunDecl", name, paramsIndices, typeParamsIndices, returnTypeIndex, bodyIndex, traitBounds, subtypeBounds }),
   let: (name: string, valueIndex: number, typeIndex?: number, loc: Loc = dummy): Node => ({ location: loc, kind: "Let", name, valueIndex, typeIndex }),
   if: (condIndex: number, thenIndex: number, elseIndex?: number, loc: Loc = dummy): Node => ({ location: loc, kind: "If", condIndex, thenIndex, elseIndex }),
   statements: (statementsIndices: number[], loc: Loc = dummy): Node => ({ location: loc, kind: "Statements", statementsIndices }),
@@ -941,6 +950,7 @@ function show(t: Type, b: ProgramBuilder | null): string {
   if (isTApp(t)) return `${t.ctor}<${t.args.map(a => show(a, b)).join(", ")}>`;
   if (isArrowN(t)) return `(${t.params.map(a => show(a, b)).join(", ")} → ${show(t.result, b)})`;
   if (isStructType(t)) return `${t.name}{${t.fields.map(f => `${f.name}: ${show(f.type, b)}`).join(", ")}}`;
+  if (isTraitType(t)) return `Trait(${t.name})`;
   if (isOverload(t)) return `{${t.alts.map(a => show(a, b)).join(" | ")}}`;
   assert(false, "unexpected type", { name: (t as any).constructor?.name });
 }
@@ -985,6 +995,8 @@ type Instr =
   | { op:"bindConstant"; name:string; ty:Type        ; loc:Loc }
   | { op:"bindType"    ; name:string; ty:Type        ; loc:Loc }
   | { op:"bindScheme"  ; name:string; scheme:Scheme; nodeIdx:number; loc:Loc }
+  | { op:"bindSchemeTraitBounds"  ; name:string; scheme:Scheme; nodeIdx:number; loc:Loc }
+  | { op:"bindSchemeSubtypeBounds"  ; name:string; scheme:Scheme; nodeIdx:number; loc:Loc }
   | { op:"bind"        ; name:string       ; loc:Loc }
   | { op:"makeArrowN"  ; params:number     ; loc:Loc }
   | { op:"applyN"      ; nodeIdx:number    ; arity:number      ; loc:Loc }
@@ -1004,7 +1016,7 @@ type Instr =
 function exprToProgram(expr: Expr, builder: ProgramBuilder): Program {
   function convertExpr(e: Expr): number {
     assert(builder, "builder is required");
-    switch(e.tag) {
+    switch (e.tag) {
       case "IntLit":
         return builder.addNode(nodeFac.intLiteral(e.value, e.loc));
       
@@ -1052,7 +1064,7 @@ function exprToProgram(expr: Expr, builder: ProgramBuilder): Program {
         }
         
         const bodyIndex = convertExpr(e.body);
-        return builder.addNode(nodeFac.funDecl("", paramIndices, [], 0, bodyIndex, e.loc));
+        return builder.addNode(nodeFac.funDecl("", paramIndices, [], 0, bodyIndex, [], [], e.loc));
       }
       
       case "FunDecl": {
@@ -1079,20 +1091,9 @@ function exprToProgram(expr: Expr, builder: ProgramBuilder): Program {
         }
         
         const bodyIndex = convertExpr(e.body);
-        const funDeclIndex = builder.addNode(nodeFac.funDecl(e.name, paramIndices, typeParamIndices, 0, bodyIndex, e.loc));
-        
-        // Create a scheme for the generic function and bind it to the environment
-        const typeVars = e.typeParams.map(tvar);
-        const paramTypes = e.params.map(() => newUnknown(builder)); // Unknown types for parameters
-        const bodyType = newUnknown(builder); // Unknown type for body
-        const funType = arrowN(paramTypes, bodyType);
-        const scheme_ = builder.scheme(e.name, e.typeParams, funType);
-
-        console.log("scheme for ", e.name, scheme_);
-        
-        // Store the scheme in the builder for later binding
-        builder.schemes.set(scheme_.id, scheme_);
-        
+        const traitBounds = e.traitBounds?.map(([tvar, trait]) => [tvar, convertExpr(trait)] as [string, number]);
+        const subtypeBounds = e.subtypeBounds?.map(([tvar, subtype]) => [tvar, convertExpr(subtype)] as [string, number]);
+        const funDeclIndex = builder.addNode(nodeFac.funDecl(e.name, paramIndices, typeParamIndices, 0, bodyIndex, traitBounds, subtypeBounds, e.loc));
         return funDeclIndex;
       }
 
@@ -1198,7 +1199,7 @@ function lineariseProgram(builder: ProgramBuilder, nodeIdx: number, mode: "synth
       const typeParams: Record<string, Type> = {};
       let scheme_: Scheme | undefined;
       if (node.typeParamsIndices.length) {
-        scheme_ = builder.scheme(node.name, [], null!);
+        scheme_ = builder.scheme(node.name, [], null!, []);
         program.schemes.set(scheme_.id, scheme_);
 
         for (const typeParamIndex of node.typeParamsIndices) {
@@ -1212,6 +1213,7 @@ function lineariseProgram(builder: ProgramBuilder, nodeIdx: number, mode: "synth
         for (const [name, type] of Object.entries(typeParams)) {
           code.push({op:"bindType", name, ty: type, loc: node.location});
         }
+
       }
 
       // Handle parameters
@@ -1233,6 +1235,18 @@ function lineariseProgram(builder: ProgramBuilder, nodeIdx: number, mode: "synth
       code.push({op:"exitScope",loc:node.location});
 
       if (scheme_) {
+        if (node.traitBounds) {
+          for (const [tvar, trait] of node.traitBounds) {
+            lineariseType(program, code, trait, node.location);
+            code.push({op:"bindSchemeTraitBounds", name: tvar, scheme: scheme_, nodeIdx, loc: node.location});
+          }
+        }
+        if (node.subtypeBounds) {
+          for (const [tvar, subtype] of node.subtypeBounds) {
+            lineariseType(program, code, subtype, node.location);
+            code.push({op:"bindSchemeSubtypeBounds", name: tvar, scheme: scheme_, nodeIdx, loc: node.location});
+          }
+        }
         code.push({op:"bindScheme", name: node.name, scheme: scheme_, nodeIdx, loc: node.location});
       }
 
@@ -1482,6 +1496,19 @@ function runInternal(state: InterpreterState): RunResult {
 
       case "bindConstant": envSetVal(i.name, i.ty); break;
       case "bindType": envSetType(i.name, i.ty); break;
+      case "bindSchemeTraitBounds": {
+        const scheme = i.scheme;
+        const trait = typeStk.pop()!;
+        assert(isTraitType(trait), "trait bound is not a trait type", { trait });
+        scheme.bounds!.push({ kind: "Trait", tvar: i.name, traitId: trait.traitId } as Bound);
+        break;
+      }
+      case "bindSchemeSubtypeBounds": {
+        const scheme = i.scheme;
+        const subtype = typeStk.pop()!;
+        scheme.bounds!.push({ kind: "Subtype", tvar: i.name, upper: subtype } as Bound);
+        break
+      }
       case "bindScheme": {
         // Update the body and bind it
         const result = typeStk.pop()!;

@@ -16,7 +16,8 @@ import {
   requireTraitNow,
   dischargeDeferredObligations,
   emitObligationsForInstantiation,
-  ProgramBuilder
+  ProgramBuilder,
+  TraitType
 } from "./typecheck";
 
 /** Run for tests until result is found */
@@ -786,6 +787,13 @@ function printProgram(program: Program, builder: ProgramBuilder) {
   program.nodes.forEach((node, index) => {
     const type = program.types[index] ? show(program.types[index], builder) : "null"
     console.log(`${index}: ${type}: ${compactInspect(node)}`)
+  });
+}
+
+function printInstructions(bytecode: Instr[]) {
+  bytecode.forEach((instr, index) => {
+    const { op, ...rest } = instr;
+    console.log(`${String(index).padStart(3)}: ${op.padStart(24)}: ${compactInspect(rest)}`)
   });
 }
 
@@ -1928,26 +1936,36 @@ describe("Type Constraints System", () => {
     registerTrait(builder, 1, "Ord");
     registerTraitImpl(builder, 1, IntType);
     registerTraitImpl(builder, 1, BoolType);
+    const env: Env = new Map();
+    envSetType(env, "Ord", new TraitType("Ord", 1));
 
     // Create a generic max function with trait bounds
-    const maxExpr = funDecl("max", ["T"], ["a", "b"], int(0), ["T", "T"], "T");
+    const maxExpr = funDecl("max", ["T"], ["a", "b"], int(0), ["T", "T"], "T", [
+      ["T", v("Ord")]
+    ]);
     const program = exprToProgram(maxExpr, builder);
 
-    // Find the scheme by function name
-    const scheme = Array.from(program.schemes.values()).find(s => s.name === "max");
-    expect(scheme).toBeDefined();
-    
-    if (scheme) {
-      scheme.bounds = createBounds([
-        { tvar: "T", traitId: 1 }  // T: Ord
-      ]);
-    }
-
     const bytecode = lineariseProgram(builder, program.rootIndex);
-    const result = runExpectingResult(bytecode, new Map(), program, builder);
+    // Find the scheme by function name
+    const scheme = Array.from(program.schemes.values()).find(s => s.name === "max")!
+    expect(scheme).toBeDefined();
+
+    printInstructions(bytecode);
+    
+    // if (scheme) {
+    //   scheme.bounds = createBounds([
+    //     { tvar: "T", traitId: 1 }  // T: Ord
+    //   ]);
+    // }
+    const result = runExpectingResult(bytecode, env, program, builder);
     
     // The result should be a function type with trait constraints
     expect(result).toBeDefined();
+    console.log(scheme);
+    expect(scheme.bounds).toBeDefined();
+    expect(scheme.bounds![0]!.kind).toBe("Trait");
+    expect(scheme.bounds![0]!.tvar).toBe("T");
+    expect((scheme.bounds![0]! as { traitId: number }).traitId).toBe(1);
   });
 
   it("should reject instantiation with types that don't implement required traits", () => {
@@ -1976,6 +1994,11 @@ describe("Type Constraints System", () => {
     registerTrait(builder, 1, "Ord");
     registerTrait(builder, 2, "Hash");
     registerTrait(builder, 3, "Eq");
+
+    const env: Env = new Map();
+    envSetType(env, "Ord", new TraitType("Ord", 1));
+    envSetType(env, "Hash", new TraitType("Hash", 2));
+    envSetType(env, "Eq", new TraitType("Eq", 3));
     
     // Int implements all three
     registerTraitImpl(builder, 1, IntType);
@@ -1983,51 +2006,61 @@ describe("Type Constraints System", () => {
     registerTraitImpl(builder, 3, IntType);
 
     // Create a generic function with multiple trait bounds
-    const mapExpr = funDecl("map", ["K", "V"], ["key", "value"], int(0), ["K", "V"], "Unit");
+    const mapExpr = funDecl("map", ["K", "V"], ["key", "value"], int(0), ["K", "V"], "Unit", [
+      ["K", v("Hash")],
+      ["K", v("Eq")]
+    ]);
     const program = exprToProgram(mapExpr, builder);
+
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
 
     // Find the scheme by function name
     const scheme = Array.from(program.schemes.values()).find(s => s.name === "map");
     expect(scheme).toBeDefined();
     
-    if (scheme) {
-      scheme.bounds = createBounds([
-        { tvar: "K", traitId: 2 },  // K: Hash
-        { tvar: "K", traitId: 3 }   // K: Eq
-      ]);
-    }
-
-    const bytecode = lineariseProgram(builder, program.rootIndex);
-    const result = runExpectingResult(bytecode, new Map(), program, builder);
-    
     expect(result).toBeDefined();
+    expect(scheme!.bounds![0]!).toEqual({ kind: "Trait", tvar: "K", traitId: 2 });
+    expect(scheme!.bounds![1]!).toEqual({ kind: "Trait", tvar: "K", traitId: 3 });
   });
 
   it("should handle subtype bounds", () => {
     // Register traits
     const builder = new ProgramBuilder();
+    const env: Env = new Map();
+    envSetType(env, "Ord", new TraitType("Ord", 1));
+    envSetType(env, "Int", IntType);
+
     registerTrait(builder, 1, "Ord");
     registerTraitImpl(builder, 1, IntType);
 
     // Create a generic function with subtype bounds
-    const numericExpr = funDecl("numeric", ["T"], ["x"], int(0), ["T"], "T");
+    const numericExpr = funDecl("numeric", ["T"], ["x"], int(0), ["T"], "T", [
+      ["T", v("Ord")]
+    ], [
+      ["T", v("Int")]
+    ]);
     const program = exprToProgram(numericExpr, builder);
+    
+
+    // if (scheme) {
+    //   scheme.bounds = createBounds(
+    //     [{ tvar: "T", traitId: 1 }],  // T: Ord
+    //     [{ tvar: "T", upper: IntType }] // T ≤ Int
+    //   );
+    // }
+
+    const bytecode = lineariseProgram(builder, program.rootIndex);
+    const result = runExpectingResult(bytecode, env, program, builder);
+    console.log(printInstructions(bytecode));
 
     // Find the scheme by function name
     const scheme = Array.from(program.schemes.values()).find(s => s.name === "numeric");
     expect(scheme).toBeDefined();
     
-    if (scheme) {
-      scheme.bounds = createBounds(
-        [{ tvar: "T", traitId: 1 }],  // T: Ord
-        [{ tvar: "T", upper: IntType }] // T ≤ Int
-      );
-    }
-
-    const bytecode = lineariseProgram(builder, program.rootIndex);
-    const result = runExpectingResult(bytecode, new Map(), program, builder);
-    
     expect(result).toBeDefined();
+    expect(scheme!.bounds![0]!).toEqual({ kind: "Trait", tvar: "T", traitId: 1 });
+    expect(scheme!.bounds![1]!).toEqual({ kind: "Subtype", tvar: "T", upper: IntType });
   });
 
   it("should handle nested generic instantiation with bounds", () => {
