@@ -507,48 +507,6 @@ interface SymbolEntry {
 type Env = Map<string, SymbolEntry>;
 
 
-/*======================================================================*/
-/* AST                                                                  */
-/*======================================================================*/
-interface Var     { tag: "Var"    ; loc: Loc; name: string }
-interface IntLit  { tag: "IntLit" ; loc: Loc; value: number }
-interface BoolLit { tag: "BoolLit"; loc: Loc; value: boolean }
-interface Lam     { tag: "Lam"    ; loc: Loc;
-                    params: string[]; paramTyNames?: string[]; body: Expr }
-interface FunDecl { tag: "FunDecl"; loc: Loc; name: string; 
-                    typeParams: string[]; params: string[]; 
-                    paramTypes?: string[]; returnType?: string; body: Expr;
-                    traitBounds?: [string, Expr][];
-                    subtypeBounds?: [string, Expr][] }
-interface AppN    { tag: "AppN"   ; loc: Loc; fn: Expr; args: Expr[] }
-interface If      { tag: "If"     ; loc: Loc; cond: Expr; thenBranch: Expr;
-                    elseBranch: Expr }
-interface Let     { tag: "Let"    ; loc: Loc; name: string;
-                    annotation: Expr|null; value: Expr|null }
-interface Seq     { tag: "Seq"    ; loc: Loc; stmts: Expr[] }
-interface TypeApp { tag: "TypeApp"; loc: Loc; ctor: Expr; args: Expr[] }
-
-type Expr = Var | IntLit | BoolLit | Lam | FunDecl | AppN | If | Let | Seq | TypeApp;
-
-/* small helpers ------------------------------------------------------*/
-const int = (n: number, l = dummy): IntLit => ({ tag: "IntLit", loc: l, value: n });
-const bool = (b: boolean, l = dummy): BoolLit => ({ tag: "BoolLit", loc: l, value: b });
-const v = (x: string, l = dummy): Var => ({ tag: "Var", loc: l, name: x });
-const lam = (p: string, body: Expr, anno?: string, l = dummy): Lam => 
-  ({ tag: "Lam", loc: l, params: [p], paramTyNames: anno ? [anno] : undefined, body });
-const lamN = (params: string[], body: Expr, paramTyNames?: string[], l = dummy): Lam => 
-  ({ tag: "Lam", loc: l, params, paramTyNames, body });
-const funDecl = (name: string, typeParams: string[], params: string[], body: Expr, paramTypes?: string[], returnType?: string, traitBounds?: [string, Expr][], subtypeBounds?: [string, Expr][], l = dummy): FunDecl => 
-  ({ tag: "FunDecl", loc: l, name, typeParams, params, paramTypes, returnType, body, traitBounds, subtypeBounds });
-const app = (f: Expr, a: Expr, l = dummy): AppN => ({ tag: "AppN", loc: l, fn: f, args: [a] });
-const appN = (f: Expr, args: Expr[], l = dummy): AppN => ({ tag: "AppN", loc: l, fn: f, args });
-const _if = (c: Expr, t: Expr, e: Expr, l = dummy): If => 
-  ({ tag: "If", loc: l, cond: c, thenBranch: t, elseBranch: e });
-const _let = (x: string, annotation: Expr | null, val: Expr | null, l = dummy): Let => 
-  ({ tag: "Let", loc: l, name: x, annotation, value: val });
-const block = (...stmts: Expr[]): Seq => ({ tag: "Seq", loc: stmts[0]?.loc ?? dummy, stmts });
-const typeApp = (ctor: Expr, args: Expr[]): Expr => ({ tag: "TypeApp", loc: ctor.loc, ctor, args });
-
 export type Node =
   | { location: Loc; kind: "IntLiteral"; value: number; }
   | { location: Loc; kind: "FloatLiteral"; value: number; }
@@ -688,19 +646,6 @@ export class Program {
   }
 }
 
-// Helper functions to create nodes
-const nodeFac = {
-  intLiteral: (value: number, loc: Loc = dummy): Node => ({ location: loc, kind: "IntLiteral", value }),
-  boolLiteral: (value: boolean, loc: Loc = dummy): Node => ({ location: loc, kind: "BoolLiteral",  value }),
-  var: (name: string, loc: Loc = dummy): Node => ({ location: loc, kind: "Var", name }),
-  app: (fnIndex: number, argsIndices: number[], typeArgsIndices: number[] = [], loc: Loc = dummy): Node => ({ location: loc, kind: "App", fnIndex, argsIndices, typeArgsIndices }),
-  funDecl: (name: string, paramsIndices: number[], typeParamsIndices: number[], returnTypeIndex: number, bodyIndex: number, traitBounds?: [string, number][], subtypeBounds?: [string, number][], loc: Loc = dummy): Node => ({ location: loc, kind: "FunDecl", name, paramsIndices, typeParamsIndices, returnTypeIndex, bodyIndex, traitBounds, subtypeBounds }),
-  let: (name: string, valueIndex: number, typeIndex?: number, loc: Loc = dummy): Node => ({ location: loc, kind: "Let", name, valueIndex, typeIndex }),
-  if: (condIndex: number, thenIndex: number, elseIndex?: number, loc: Loc = dummy): Node => ({ location: loc, kind: "If", condIndex, thenIndex, elseIndex }),
-  statements: (statementsIndices: number[], loc: Loc = dummy): Node => ({ location: loc, kind: "Statements", statementsIndices }),
-  funParam: (name: string, typeIndex: number, loc: Loc = dummy): Node => ({ location: loc, kind: "FunParam", name, typeIndex }),
-  typeApp: (baseIndex: number, typeArgsIndices: number[], loc: Loc = dummy): Node => ({ location: loc, kind: "TypeApp", baseIndex, typeArgsIndices }),
-}
 
 //======================================================================
 // 2.  Type checker
@@ -1012,110 +957,6 @@ type Instr =
   | { op:"storeApp"    ; nodeIdx:number    ; loc:Loc }
   | { op:"unknown"     ; loc:Loc };
 
-// Helper function to convert Expr to Program
-function exprToProgram(expr: Expr, builder: ProgramBuilder): Program {
-  function convertExpr(e: Expr): number {
-    assert(builder, "builder is required");
-    switch (e.tag) {
-      case "IntLit":
-        return builder.addNode(nodeFac.intLiteral(e.value, e.loc));
-      
-      case "BoolLit":
-        return builder.addNode(nodeFac.boolLiteral(e.value, e.loc));
-      
-      case "Var":
-        return builder.addNode(nodeFac.var(e.name, e.loc));
-      
-      case "AppN": {
-        const fnIndex = convertExpr(e.fn);
-        const argsIndices = e.args.map(convertExpr);
-        return builder.addNode(nodeFac.app(fnIndex, argsIndices, [], e.loc));
-      }
-      
-      case "If": {
-        const condIndex = convertExpr(e.cond);
-        const thenIndex = convertExpr(e.thenBranch);
-        const elseIndex = convertExpr(e.elseBranch);
-        return builder.addNode(nodeFac.if(condIndex, thenIndex, elseIndex, e.loc));
-      }
-      
-      case "Let": {
-        const valueIndex = e.value ? convertExpr(e.value) : -1;
-        // Note: body would need to be handled separately
-        let ann: number | undefined = undefined;
-        if (e.annotation !== null) {
-          ann = convertExpr(e.annotation);
-        }
-        return builder.addNode(nodeFac.let(e.name, valueIndex, ann, e.loc));
-      }
-      
-      case "Seq": {
-        const statementsIndices = e.stmts.map(convertExpr);
-        return builder.addNode(nodeFac.statements(statementsIndices, e.loc));
-      }
-      
-      case "Lam": {
-        // Convert lambda to FunDecl with multiple parameters
-        const paramIndices: number[] = [];
-        
-        for (let i = 0; i < e.params.length; i++) {
-          const paramIndex = builder.addNode(nodeFac.funParam(e.params[i]!, -1, e.loc));
-          paramIndices.push(paramIndex);
-        }
-        
-        const bodyIndex = convertExpr(e.body);
-        return builder.addNode(nodeFac.funDecl("", paramIndices, [], 0, bodyIndex, [], [], e.loc));
-      }
-      
-      case "FunDecl": {
-        // Convert generic function declaration
-        const paramIndices: number[] = [];
-        
-        // Add type parameters
-        const typeParamIndices: number[] = [];
-        for (const typeParam of e.typeParams) {
-          const typeParamIndex = builder.addNode({ 
-            location: e.loc, 
-            kind: "TypeParam", 
-            name: typeParam, 
-            constraintsIndices: [] 
-          });
-          typeParamIndices.push(typeParamIndex);
-        }
-
-        // Add function parameters
-        for (let i = 0; i < e.params.length; i++) {
-          const typeIndex = e.paramTypes?.[i] ? builder.addNode(nodeFac.var(e.paramTypes[i]!)) : -1;
-          const paramIndex = builder.addNode(nodeFac.funParam(e.params[i]!, typeIndex, e.loc));
-          paramIndices.push(paramIndex);
-        }
-        
-        const bodyIndex = convertExpr(e.body);
-        const traitBounds = e.traitBounds?.map(([tvar, trait]) => [tvar, convertExpr(trait)] as [string, number]);
-        const subtypeBounds = e.subtypeBounds?.map(([tvar, subtype]) => [tvar, convertExpr(subtype)] as [string, number]);
-        const funDeclIndex = builder.addNode(nodeFac.funDecl(e.name, paramIndices, typeParamIndices, 0, bodyIndex, traitBounds, subtypeBounds, e.loc));
-        return funDeclIndex;
-      }
-
-      case "TypeApp": {
-        const ctorIndex = convertExpr(e.ctor);
-        const argsIndices = e.args.map(convertExpr);
-        return builder.addNode(nodeFac.typeApp(ctorIndex, argsIndices, e.loc));
-      }
-
-      default: {
-        const _: never = e;
-        assert(false, "Unexpected expression", { e });
-      }
-    }
-  }
-  
-  const rootIndex = convertExpr(expr);
-  builder.types = new Array(builder.nodes.length).fill(null);
-  const program = new Program(builder.nodes, builder.types, rootIndex, builder.schemes, builder.apps, builder.instantiations);
-  builder.program = program;
-  return program;
-}
 
 /*======================================================================*/
 /* 4.  Lineariser                                                       */
@@ -1644,8 +1485,10 @@ function runInternal(state: InterpreterState): RunResult {
 const locStr = (i:Instr) => `${i.loc.file}:${i.loc.line}:${i.loc.col}`;
 const compactInspect = (i: any) => inspect(i, { depth: 1, colors: true, compact: true })
 
+
+
 // Export missing types and functions for tests
-export type { Instr, Env, Expr, RunResult, InterpreterState, SuspendMissing };
+export type { Instr, Env, RunResult, InterpreterState, SuspendMissing };
 export { 
   assert, 
   isType, 
@@ -1653,17 +1496,6 @@ export {
   newUnknown, 
   arrow, 
   arrowN, 
-  int, 
-  bool, 
-  v, 
-  lam, 
-  lamN,
-  app, 
-  appN,
-  _if, 
-  _let, 
-  block,
-  exprToProgram,
   lineariseProgram,
   lineariseType,
   runInternal,
@@ -1684,8 +1516,6 @@ export {
   getNextSchemeId,
   isArrowN,
   compactInspect,
-  funDecl,
-  typeApp,
   areTypesEqual,
   // Type constraints system exports
   typeKey,

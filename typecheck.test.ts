@@ -3,11 +3,10 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import {
   type Instr, type Env, type Program, type Type, type Scheme, type UnknownType, type SuspendMissing,
   assert, isType, isScheme, newUnknown, arrow, arrowN,
-  int, bool, v, lam, lamN, app, appN, _if, _let, block,
-  exprToProgram, lineariseProgram, runInternal, createInterpreterState,
+  lineariseProgram, runInternal, createInterpreterState,
   startTrial, rollback, commit, unify, subsume, show,
   tvar, tapp, tstruct, overload, scheme, dummy, getNextSchemeId,
-  isArrowN, compactInspect, funDecl, typeApp, areTypesEqual,
+  isArrowN, compactInspect, areTypesEqual,
   IntType, BoolType, UnitType, FloatType,
   registerTrait,
   registerTraitImpl,
@@ -17,8 +16,9 @@ import {
   dischargeDeferredObligations,
   emitObligationsForInstantiation,
   ProgramBuilder,
-  TraitType
+  TraitType,
 } from "./typecheck";
+import { TestBuilder } from "./testUtils";
 
 /** Run for tests until result is found */
 function runExpectingResult(code: Instr[], initialEnv: Env, program: Program, builder?: ProgramBuilder): Type {
@@ -30,14 +30,15 @@ function runExpectingResult(code: Instr[], initialEnv: Env, program: Program, bu
   return result;
 }
 
-
 describe("Basic Type Checking", () => {
   it("should type check identity function applied to Int", () => {
     const builder = new ProgramBuilder();
-    const id   = lam("x", v("x"));                    // λx. x   (no annotation)
-    const prog = app(id, int(42));                    // (λx. x) 42
+    const b = new TestBuilder(builder);
+    const x = b.var("x");                             // x
+    const id = b.lam("x", x);                         // λx. x   (no annotation)
+    const prog = b.app(id, b.int(42));                // (λx. x) 42
 
-    const program = exprToProgram(prog, builder);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, new Map(), program, builder);
     expect(result).toBe(IntType);
@@ -55,108 +56,114 @@ describe("Sequence Examples", () => {
   envSetVal(env, "isPositive", arrow(IntType, BoolType));
 
   it("should handle basic sequence with let bindings", () => {
-    const seqProg1 = block(
-      app(v("print"), int(1)),                        // print 1 : Unit
-      _let("y", null, int(2)),                       // let y=2
-      v("y")                                          // y : Int
+    const builder = new ProgramBuilder();
+    const b = new TestBuilder(builder);
+    const seqProg1 = b.block(
+      b.app(b.var("print"), b.int(1)),                // print 1 : Unit
+      b.let("y", null, b.int(2)),                     // let y=2
+      b.var("y")                                      // y : Int
     );
 
-    const builder = new ProgramBuilder();
-    const program1 = exprToProgram(seqProg1, builder);
+    const program1 = b.program(seqProg1);
     const seqBytecode1 = lineariseProgram(builder, program1.rootIndex);
     const result1 = runExpectingResult(seqBytecode1, env, program1, builder);
     expect(result1).toBe(IntType);
   });
 
   it("should handle sequence with function application and conditional", () => {
-    const seqProg2 = block(
-      app(v("print"), int(10)),                       // print 10 : Unit
-      _let("x", null, int(5)),                               // let x=5
-      _if(app(v("isPositive"), v("x")),             // if isPositive x then
-        app(v("print"), int(100)),                  //   print 100 : Unit
-        app(v("print"), int(200))                   //   print 200 : Unit
+    const builder = new ProgramBuilder();
+    const b = new TestBuilder(builder);
+    const seqProg2 = b.block(
+      b.app(b.var("print"), b.int(10)),               // print 10 : Unit
+      b.let("x", null, b.int(5)),                     // let x=5
+      b.if(b.app(b.var("isPositive"), b.var("x")),    // if isPositive x then
+        b.app(b.var("print"), b.int(100)),            //   print 100 : Unit
+        b.app(b.var("print"), b.int(200))             //   print 200 : Unit
       ),
-      _let("result", null, int(42)),           // let result=42
-      v("result")                               // result : Int
+      b.let("result", null, b.int(42)),               // let result=42
+      b.var("result")                                 // result : Int
     );
 
-    const builder = new ProgramBuilder();
-    const program2 = exprToProgram(seqProg2, builder);
+    const program2 = b.program(seqProg2);
     const seqBytecode2 = lineariseProgram(builder, program2.rootIndex);
     const result2 = runExpectingResult(seqBytecode2, env, program2, builder);
     expect(result2).toBe(IntType);
   });
 
   it("should handle nested let bindings with function calls", () => {
-    const seqProg3 = block(
-      app(v("print"), int(1)),                        // print 1 : Unit
-      _let("a", null, int(10)),                              // let a=10
-      _let("b", null, int(20)),                            //   let b=20
-      _let("sum", null, app(app(v("add"), v("a")), v("b"))), // let sum=add a b
-      app(v("print"), v("sum")),                 //     print sum : Unit
-      bool(true)                                      // true : Bool
+    const builder = new ProgramBuilder();
+    const b = new TestBuilder(builder);
+    const seqProg3 = b.block(
+      b.app(b.var("print"), b.int(1)),                // print 1 : Unit
+      b.let("a", null, b.int(10)),                    // let a=10
+      b.let("b", null, b.int(20)),                    //   let b=20
+      b.let("sum", null, b.app(b.app(b.var("add"), b.var("a")), b.var("b"))), // let sum=add a b
+      b.app(b.var("print"), b.var("sum")),            //     print sum : Unit
+      b.bool(true)                                    // true : Bool
     );
 
-    const builder = new ProgramBuilder();
-    const program3 = exprToProgram(seqProg3, builder);
+    const program3 = b.program(seqProg3);
     const seqBytecode3 = lineariseProgram(builder, program3.rootIndex);
     const result3 = runExpectingResult(seqBytecode3, env, program3, builder);
     expect(result3).toBe(BoolType);
   });
 
   it("should handle complex sequence with multiple operations", () => {
-    const seqProg4 = block(
-      app(v("print"), int(0)),                        // print 0 : Unit
-      _let("counter", null, int(1)),                         // let counter=1
-      _if(app(v("isPositive"), v("counter")),      //   if isPositive counter then
-        block(                                       //     block:
-          app(v("print"), int(1)),                  //       print 1 : Unit
-          app(v("print"), int(2)),                  //       print 2 : Unit
-          int(3)                                    //       3 : Int
+    const builder = new ProgramBuilder();
+    const b = new TestBuilder(builder);
+    const seqProg4 = b.block(
+      b.app(b.var("print"), b.int(0)),                // print 0 : Unit
+      b.let("counter", null, b.int(1)),               // let counter=1
+      b.if(b.app(b.var("isPositive"), b.var("counter")),      //   if isPositive counter then
+        b.block(                                      //     block:
+          b.app(b.var("print"), b.int(1)),            //       print 1 : Unit
+          b.app(b.var("print"), b.int(2)),            //       print 2 : Unit
+          b.int(3)                                    //       3 : Int
         ),
-        block(                                       //     else block:
-          app(v("print"), int(-1)),                 //       print -1 : Unit
-          app(v("print"), int(-2)),                 //       print -2 : Unit
-          int(-3)                                   //       -3 : Int
+        b.block(                                      //     else block:
+          b.app(b.var("print"), b.int(-1)),           //       print -1 : Unit
+          b.app(b.var("print"), b.int(-2)),           //       print -2 : Unit
+          b.int(-3)                                   //       -3 : Int
         )
       ),
-      _let("final", null, int(999)),            // let final=999
-      v("final")                                 // final : Int
+      b.let("final", null, b.int(999)),               // let final=999
+      b.var("final")                                  // final : Int
     );
 
-    const builder = new ProgramBuilder();
-    const program4 = exprToProgram(seqProg4, builder);
+    const program4 = b.program(seqProg4);
     const seqBytecode4 = lineariseProgram(builder, program4.rootIndex);
     const result4 = runExpectingResult(seqBytecode4, env, program4, builder);
     expect(result4).toBe(IntType);
   });
 
   it("should handle Unit type handling", () => {
-    const seqProg5 = block(
-      app(v("print"), int(1)),                        // print 1 : Unit
-      app(v("print"), int(2)),                        // print 2 : Unit
-      app(v("print"), int(3)),                        // print 3 : Unit
-      _let("dummy", null, app(v("print"), int(4))),         // let dummy=print 4
-      int(42)                                       //   42 : Int
+    const builder = new ProgramBuilder();
+    const b = new TestBuilder(builder);
+    const seqProg5 = b.block(
+      b.app(b.var("print"), b.int(1)),                // print 1 : Unit
+      b.app(b.var("print"), b.int(2)),                // print 2 : Unit
+      b.app(b.var("print"), b.int(3)),                // print 3 : Unit
+      b.let("dummy", null, b.app(b.var("print"), b.int(4))),         // let dummy=print 4
+      b.int(42)                                       //   42 : Int
     );
 
-    const builder = new ProgramBuilder();
-    const program5 = exprToProgram(seqProg5, builder);
+    const program5 = b.program(seqProg5);
     const seqBytecode5 = lineariseProgram(builder, program5.rootIndex);
     const result5 = runExpectingResult(seqBytecode5, env, program5, builder);
     expect(result5).toBe(IntType);
   });
 
   it("should handle subtype system with primitive widening", () => {
-    const seqProg6 = block(
-      app(v("print"), int(10)),                       // print 10 : Unit
-      _let("x", v("Float"), int(5)),                  // let x: Float = 5
-      _let("y", v("Int"), int(3)),                    // let y: Int = 3
-      bool(true)                                      // true : Bool
+    const builder = new ProgramBuilder();
+    const b = new TestBuilder(builder);
+    const seqProg6 = b.block(
+      b.app(b.var("print"), b.int(10)),               // print 10 : Unit
+      b.let("x", b.var("Float"), b.int(5)),           // let x: Float = 5
+      b.let("y", b.var("Int"), b.int(3)),             // let y: Int = 3
+      b.bool(true)                                    // true : Bool
     );
 
-    const builder = new ProgramBuilder();
-    const program6 = exprToProgram(seqProg6, builder);
+    const program6 = b.program(seqProg6);
     const seqBytecode6 = lineariseProgram(builder, program6.rootIndex);
     const result6 = runExpectingResult(seqBytecode6, env, program6, builder);
     expect(result6).toBe(BoolType);
@@ -313,9 +320,10 @@ describe("Overload Functionality", () => {
     const env: Env = new Map();
     envSetVal(env, "add", overloadedFn);
 
-    const prog1 = app(v("add"), int(42));
     const builder = new ProgramBuilder();
-    const program1 = exprToProgram(prog1, builder);
+    const b = new TestBuilder(builder);
+    const prog1 = b.app(b.var("add"), b.int(42));
+    const program1 = b.program(prog1);
     const bytecode1 = lineariseProgram(builder, program1.rootIndex);
     const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toBe(IntType);
@@ -330,9 +338,10 @@ describe("Overload Functionality", () => {
     const env: Env = new Map();
     envSetVal(env, "add", overloadedFn);
 
-    const prog2 = app(v("add"), int(42)); // This should work due to Int ≤ Float
     const builder = new ProgramBuilder();
-    const program2 = exprToProgram(prog2, builder);
+    const b = new TestBuilder(builder);
+    const prog2 = b.app(b.var("add"), b.int(42)); // This should work due to Int ≤ Float
+    const program2 = b.program(prog2);
     const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toBe(IntType);
@@ -347,9 +356,10 @@ describe("Overload Functionality", () => {
     const env: Env = new Map();
     envSetVal(env, "func", moreSpecificOverload);
     
-    const prog3 = app(v("func"), bool(true));
     const builder = new ProgramBuilder();
-    const program3 = exprToProgram(prog3, builder);
+    const b = new TestBuilder(builder);
+    const prog3 = b.app(b.var("func"), b.bool(true));
+    const program3 = b.program(prog3);
     const bytecode3 = lineariseProgram(builder, program3.rootIndex);
     const result3 = runExpectingResult(bytecode3, env, program3, builder);
     expect(result3).toBe(BoolType);
@@ -364,9 +374,10 @@ describe("Overload Functionality", () => {
     const env: Env = new Map();
     envSetVal(env, "add", overloadedFn);
 
-    const prog4 = app(v("add"), bool(true));
     const builder = new ProgramBuilder();
-    const program4 = exprToProgram(prog4, builder);
+    const b = new TestBuilder(builder);
+    const prog4 = b.app(b.var("add"), b.bool(true));
+    const program4 = b.program(prog4);
     const bytecode4 = lineariseProgram(builder, program4.rootIndex);
     
     expect(() => {
@@ -382,9 +393,10 @@ describe("Overload Functionality", () => {
     const env: Env = new Map();
     envSetVal(env, "ambiguous", ambiguousOverload);
     
-    const prog7 = app(v("ambiguous"), int(42));
     const builder = new ProgramBuilder();
-    const program7 = exprToProgram(prog7, builder);
+    const b = new TestBuilder(builder);
+    const prog7 = b.app(b.var("ambiguous"), b.int(42));
+    const program7 = b.program(prog7);
     const bytecode7 = lineariseProgram(builder, program7.rootIndex);
     
     expect(() => {
@@ -400,9 +412,10 @@ describe("Overload Functionality", () => {
     const env: Env = new Map();
     envSetVal(env, "exactVsCast", exactVsCastOverload);
     
-    const prog8 = app(v("exactVsCast"), int(42));
     const builder = new ProgramBuilder();
-    const program8 = exprToProgram(prog8, builder);
+    const b = new TestBuilder(builder);
+    const prog8 = b.app(b.var("exactVsCast"), b.int(42));
+    const program8 = b.program(prog8);
     const bytecode8 = lineariseProgram(builder, program8.rootIndex);
     const result8 = runExpectingResult(bytecode8, env, program8, builder);
     expect(result8).toBe(IntType);
@@ -415,9 +428,10 @@ describe("Overload Functionality", () => {
     const env: Env = new Map();
     envSetVal(env, "onlyCast", onlyCastOverload);
     
-    const prog9 = app(v("onlyCast"), int(42));
     const builder = new ProgramBuilder();
-    const program9 = exprToProgram(prog9, builder);
+    const b = new TestBuilder(builder);
+    const prog9 = b.app(b.var("onlyCast"), b.int(42));
+    const program9 = b.program(prog9);
     const bytecode9 = lineariseProgram(builder, program9.rootIndex);
     const result9 = runExpectingResult(bytecode9, env, program9, builder);
     expect(result9).toBe(FloatType);
@@ -432,9 +446,10 @@ describe("Multi-Argument Functions", () => {
     const add3Fn = arrowN([IntType, IntType, IntType], IntType);
     envSetVal(env, "add3", add3Fn);
     
-    const prog1 = appN(v("add3"), [int(1), int(2), int(3)]);
     const builder = new ProgramBuilder();
-    const program1 = exprToProgram(prog1, builder);
+    const b = new TestBuilder(builder);
+    const prog1 = b.appN(b.var("add3"), [b.int(1), b.int(2), b.int(3)]);
+    const program1 = b.program(prog1);
     const bytecode1 = lineariseProgram(builder, program1.rootIndex);
     const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toBe(IntType);
@@ -445,9 +460,10 @@ describe("Multi-Argument Functions", () => {
     const mixedFn = arrowN([IntType, BoolType, FloatType], BoolType);
     envSetVal(env, "mixed", mixedFn);
     
-    const prog2 = appN(v("mixed"), [int(42), bool(true), int(3.14)]);
     const builder = new ProgramBuilder();
-    const program2 = exprToProgram(prog2, builder);
+    const b = new TestBuilder(builder);
+    const prog2 = b.appN(b.var("mixed"), [b.int(42), b.bool(true), b.int(3.14)]);
+    const program2 = b.program(prog2);
     const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toBe(BoolType);
@@ -461,9 +477,10 @@ describe("Multi-Argument Functions", () => {
     ]);
     envSetVal(env, "overloadedMulti", overloadedMultiFn);
     
-    const prog3 = appN(v("overloadedMulti"), [int(10), int(20)]);
     const builder = new ProgramBuilder();
-    const program3 = exprToProgram(prog3, builder);
+    const b = new TestBuilder(builder);
+    const prog3 = b.appN(b.var("overloadedMulti"), [b.int(10), b.int(20)]);
+    const program3 = b.program(prog3);
     const bytecode3 = lineariseProgram(builder, program3.rootIndex);
     const result3 = runExpectingResult(bytecode3, env, program3, builder);
     expect(result3).toBe(IntType);
@@ -474,9 +491,10 @@ describe("Multi-Argument Functions", () => {
     const add3Fn = arrowN([IntType, IntType, IntType], IntType);
     envSetVal(env, "add3", add3Fn);
     
-    const prog4 = appN(v("add3"), [int(1), int(2)]); // Only 2 args, needs 3
     const builder = new ProgramBuilder();
-    const program4 = exprToProgram(prog4, builder);
+    const b = new TestBuilder(builder);
+    const prog4 = b.appN(b.var("add3"), [b.int(1), b.int(2)]); // Only 2 args, needs 3
+    const program4 = b.program(prog4);
     const bytecode4 = lineariseProgram(builder, program4.rootIndex);
     
     expect(() => {
@@ -491,12 +509,13 @@ describe("Multi-Argument Functions", () => {
     const nestedFn = arrowN([IntType, IntType], IntType);
     envSetVal(env, "nested", nestedFn);
     
-    const prog5 = appN(v("nested"), [
-      appN(v("add3"), [int(1), int(2), int(3)]),
-      int(10)
-    ]);
     const builder = new ProgramBuilder();
-    const program5 = exprToProgram(prog5, builder);
+    const b = new TestBuilder(builder);
+    const prog5 = b.appN(b.var("nested"), [
+      b.appN(b.var("add3"), [b.int(1), b.int(2), b.int(3)]),
+      b.int(10)
+    ]);
+    const program5 = b.program(prog5);
     const bytecode5 = lineariseProgram(builder, program5.rootIndex);
     const result5 = runExpectingResult(bytecode5, env, program5, builder);
     expect(result5).toBe(IntType);
@@ -506,6 +525,7 @@ describe("Multi-Argument Functions", () => {
 describe("Generic Type System", () => {
   it("should handle generic identity function with Int", () => {
     const builder = new ProgramBuilder();
+    const b = new TestBuilder(builder);
     const env: Env = new Map();
     
     // Define a generic identity function: ∀T. T → T
@@ -513,8 +533,8 @@ describe("Generic Type System", () => {
     envSetVal(env, "id", idScheme);
     
     // Test with Int
-    const prog1 = app(v("id"), int(42));
-    const program1 = exprToProgram(prog1, builder);
+    const prog1 = b.app(b.var("id"), b.int(42));
+    const program1 = b.program(prog1);
     const bytecode1 = lineariseProgram(builder, program1.rootIndex);
     const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toBe(IntType);
@@ -522,6 +542,7 @@ describe("Generic Type System", () => {
 
   it("should handle generic identity function with Bool", () => {
     const builder = new ProgramBuilder();
+    const b = new TestBuilder(builder);
     const env: Env = new Map();
     
     // Define a generic identity function: ∀T. T → T
@@ -529,8 +550,8 @@ describe("Generic Type System", () => {
     envSetVal(env, "id", idScheme);
     
     // Test with Bool
-    const prog2 = app(v("id"), bool(true));
-    const program2 = exprToProgram(prog2, builder);
+    const prog2 = b.app(b.var("id"), b.bool(true));
+    const program2 = b.program(prog2);
     const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toBe(BoolType);
@@ -585,10 +606,10 @@ describe("Pending Bindings", () => {
     const builder = new ProgramBuilder();
     const env: Env = new Map();
     env.set("missingVar", { value: { tag: "PendV", waiters: [] } });
-    
+    const b = new TestBuilder(builder);
     // Create a program that references a variable that's not in the environment
-    const prog = v("missingVar");
-    const program = exprToProgram(prog, builder);
+    const prog = b.var("missingVar");
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     
     // Run the interpreter and expect it to suspend
@@ -609,8 +630,9 @@ describe("Pending Bindings", () => {
 
   it("should handle multiple lookups of the same pending variable", () => {
     const builder = new ProgramBuilder();
-    const prog2 = app(v("missingVar"), int(42)); // missingVar(42)
-    const program2 = exprToProgram(prog2, builder);
+    const b = new TestBuilder(builder);
+    const prog2 = b.app(b.var("missingVar"), b.int(42)); // missingVar(42)
+    const program2 = b.program(prog2);
     const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     const env2 = new Map();
     env2.set("missingVar", { tag: "Pending", waiters: [] });
@@ -632,8 +654,9 @@ describe("Pending Bindings", () => {
   
   it("should handle resume with error", () => {
     const builder = new ProgramBuilder();
-    const prog3 = v("anotherMissingVar");
-    const program3 = exprToProgram(prog3, builder);
+    const b = new TestBuilder(builder);
+    const prog3 = b.var("anotherMissingVar");
+    const program3 = b.program(prog3);
     const bytecode3 = lineariseProgram(builder, program3.rootIndex);
     const env3 = new Map();
     env3.set("anotherMissingVar", { tag: "Pending", waiters: [] });
@@ -653,8 +676,9 @@ describe("Pending Bindings", () => {
   
   it("should handle nested pending bindings", () => {
     const builder = new ProgramBuilder();
-    const prog4 = app(app(v("outerFunc"), v("innerVar")), int(10));
-    const program4 = exprToProgram(prog4, builder);
+    const b = new TestBuilder(builder);
+    const prog4 = b.app(b.app(b.var("outerFunc"), b.var("innerVar")), b.int(10));
+    const program4 = b.program(prog4);
     const bytecode4 = lineariseProgram(builder, program4.rootIndex);
 
     const env4 = new Map();
@@ -688,8 +712,9 @@ describe("Unbound Variables", () => {
   it("should reject simple unbound variable", () => {
     const builder = new ProgramBuilder();
     const env: Env = new Map();
-    const prog = v("unboundVar");
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.var("unboundVar");
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     
     expect(() => {
@@ -700,8 +725,9 @@ describe("Unbound Variables", () => {
   it("should reject unbound variable in function application", () => {
     const builder = new ProgramBuilder();
     const env: Env = new Map();
-    const prog2 = app(v("unboundFunc"), int(42));
-    const program2 = exprToProgram(prog2, builder);
+    const b = new TestBuilder(builder);
+    const prog2 = b.app(b.var("unboundFunc"), b.int(42));
+    const program2 = b.program(prog2);
     const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     
     expect(() => {
@@ -712,8 +738,9 @@ describe("Unbound Variables", () => {
   it("should reject unbound variable in let binding", () => {
     const builder = new ProgramBuilder();
     const env: Env = new Map();
-    const prog3 = _let("x", null, v("unboundInLet"));
-    const program3 = exprToProgram(prog3, builder);
+    const b = new TestBuilder(builder);
+    const prog3 = b.let("x", null, b.var("unboundInLet"));
+    const program3 = b.program(prog3);
     const bytecode3 = lineariseProgram(builder, program3.rootIndex);
     
     expect(() => {
@@ -724,8 +751,9 @@ describe("Unbound Variables", () => {
   it("should reject unbound variable in nested scope", () => {
     const builder = new ProgramBuilder();
     const env: Env = new Map();
-    const prog4 = lam("param", v("unboundInLambda"));
-    const program4 = exprToProgram(prog4, builder);
+    const b = new TestBuilder(builder);
+    const prog4 = b.lam("param", b.var("unboundInLambda"));
+    const program4 = b.program(prog4);
     const bytecode4 = lineariseProgram(builder, program4.rootIndex);
     
     expect(() => {
@@ -736,8 +764,9 @@ describe("Unbound Variables", () => {
   it("should reject multiple unbound variables", () => {
     const builder = new ProgramBuilder();
     const env: Env = new Map();
-    const prog5 = app(app(v("func1"), v("func2")), int(42));
-    const program5 = exprToProgram(prog5, builder);
+    const b = new TestBuilder(builder);
+    const prog5 = b.app(b.app(b.var("func1"), b.var("func2")), b.int(42));
+    const program5 = b.program(prog5);
     const bytecode5 = lineariseProgram(builder, program5.rootIndex);
     
     expect(() => {
@@ -751,8 +780,9 @@ describe("Unbound Variables", () => {
     envSetVal(envWithSome, "boundVar", IntType);
     envSetVal(envWithSome, "boundFunc", arrow(IntType, BoolType));
     
-    const prog6 = app(app(v("boundFunc"), v("boundVar")), v("unboundVar"));
-    const program6 = exprToProgram(prog6, builder);
+    const b = new TestBuilder(builder);
+    const prog6 = b.app(b.app(b.var("boundFunc"), b.var("boundVar")), b.var("unboundVar"));
+    const program6 = b.program(prog6);
     const bytecode6 = lineariseProgram(builder, program6.rootIndex);
     
     expect(() => {
@@ -765,12 +795,13 @@ describe("Unbound Variables", () => {
     const envWithPrint: Env = new Map();
     envSetVal(envWithPrint, "print", arrow(IntType, UnitType));
     
-    const prog7 = block(
-      app(v("print"), int(1)),
-      v("unboundInSeq"),
-      int(42)
+    const b = new TestBuilder(builder);
+    const prog7 = b.block(
+      b.app(b.var("print"), b.int(1)),
+      b.var("unboundInSeq"),
+      b.int(42)
     );
-    const program7 = exprToProgram(prog7, builder);
+    const program7 = b.program(prog7);
     const bytecode7 = lineariseProgram(builder, program7.rootIndex);
     
     expect(() => {
@@ -799,9 +830,10 @@ function printInstructions(bytecode: Instr[]) {
 
 describe("Program-Based Type Checking", () => {
   it("should handle conversion from Expr to Program", () => {
-    const expr = int(42);
     const builder = new ProgramBuilder();
-    const convertedProgram = exprToProgram(expr, builder);
+    const b = new TestBuilder(builder);
+    const expr = b.int(42);
+    const convertedProgram = b.program(expr);
 
     expect(convertedProgram.nodes.length).toBeGreaterThan(0);
     expect(convertedProgram.rootIndex).toBeDefined();
@@ -812,9 +844,10 @@ describe("Program-Based Type Checking", () => {
   });
   
   it("should handle lambda expression conversion", () => {
-    const lambdaExpr = lam("x", v("x")); // λx. x
     const builder = new ProgramBuilder();
-    const lambdaProgram = exprToProgram(lambdaExpr, builder);
+    const b = new TestBuilder(builder);
+    const lambdaExpr = b.lam("x", b.var("x")); // λx. x
+    const lambdaProgram = b.program(lambdaExpr);
     
     expect(lambdaProgram.nodes.length).toBeGreaterThan(0);
     expect(lambdaProgram.rootIndex).toBeDefined();
@@ -825,10 +858,11 @@ describe("Program-Based Type Checking", () => {
   });
   
   it("should handle lambda application", () => {
-    const lambdaExpr = lam("x", v("x")); // λx. x
-    const lambdaAppExpr = app(lambdaExpr, int(42)); // (λx. x) 42
     const builder = new ProgramBuilder();
-    const lambdaAppProgram = exprToProgram(lambdaAppExpr, builder);
+    const b = new TestBuilder(builder);
+    const lambdaExpr = b.lam("x", b.var("x")); // λx. x
+    const lambdaAppExpr = b.app(lambdaExpr, b.int(42)); // (λx. x) 42
+    const lambdaAppProgram = b.program(lambdaAppExpr);
     
     const bytecode7 = lineariseProgram(builder, lambdaAppProgram.rootIndex);
     const result7 = runExpectingResult(bytecode7, new Map(), lambdaAppProgram, builder);
@@ -836,9 +870,10 @@ describe("Program-Based Type Checking", () => {
   });
   
   it("should handle multi-parameter lambda", () => {
-    const multiLambdaExpr = lamN(["x", "y"], app(app(v("add"), v("x")), v("y"))); // λx y. add x y
     const builder = new ProgramBuilder();
-    const multiLambdaProgram = exprToProgram(multiLambdaExpr, builder);
+    const b = new TestBuilder(builder);
+    const multiLambdaExpr = b.lamN(["x", "y"], b.app(b.app(b.var("add"), b.var("x")), b.var("y"))); // λx y. add x y
+    const multiLambdaProgram = b.program(multiLambdaExpr);
     
     expect(multiLambdaProgram.nodes.length).toBeGreaterThan(0);
     
@@ -852,10 +887,11 @@ describe("Program-Based Type Checking", () => {
   });
   
   it("should handle multi-parameter lambda application", () => {
-    const multiLambdaExpr = lamN(["x", "y"], app(app(v("add"), v("x")), v("y"))); // λx y. add x y
-    const multiLambdaAppExpr = appN(multiLambdaExpr, [int(10), int(20)]); // (λx y. add x y) 10 20
     const builder = new ProgramBuilder();
-    const multiLambdaAppProgram = exprToProgram(multiLambdaAppExpr, builder);
+    const b = new TestBuilder(builder);
+    const multiLambdaExpr = b.lamN(["x", "y"], b.app(b.app(b.var("add"), b.var("x")), b.var("y"))); // λx y. add x y
+    const multiLambdaAppExpr = b.appN(multiLambdaExpr, [b.int(10), b.int(20)]); // (λx y. add x y) 10 20
+    const multiLambdaAppProgram = b.program(multiLambdaAppExpr);
     
     // Set up environment with add function
     const env9: Env = new Map();
@@ -870,16 +906,17 @@ describe("Program-Based Type Checking", () => {
 describe("Generic Functions in Programs", () => {
   it("should define and use generic identity function in program", () => {
     // Define a generic identity function: ∀T. T → T
-    const genericId = funDecl("id", ["T"], ["x"], v("x"), ["T"]);
+    const builder = new ProgramBuilder();
+    const b = new TestBuilder(builder);
+    const genericId = b.funDecl("id", ["T"], ["x"], b.var("x"), ["T"]);
     
     // Create a program that defines the function and uses it
-    const programExpr = block(
+    const programExpr = b.block(
       genericId,  // Define the generic function
-      app(v("id"), int(42))  // Use it with Int
+      b.app(b.var("id"), b.int(42))  // Use it with Int
     );
     
-    const builder = new ProgramBuilder();
-    const program = exprToProgram(programExpr, builder);
+    const program = b.program(programExpr);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, new Map(), program, builder);
     expect(result).toBe(IntType);
@@ -1006,8 +1043,9 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     const pointStruct = tstruct("Point", [{ name: "x", type: IntType }, { name: "y", type: IntType }]);
     envSetType(env, "Point", pointStruct);
     
-    const prog = _let("p", v("Point"), null);
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.let("p", b.var("Point"), null);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     expect(result).toEqualType(pointStruct, builder);
@@ -1023,14 +1061,15 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     const listBool = tapp(listScheme, [BoolType]);
     envSetType(env, "List", listScheme);
     
-    const prog1 = _let("numbers", typeApp(v("List"), [v("Int")]), null);
-    const program1 = exprToProgram(prog1, builder);
+    const b = new TestBuilder(builder);
+    const prog1 = b.let("numbers", b.typeApp("List", ["Int"]), null);
+    const program1 = b.program(prog1);
     const bytecode1 = lineariseProgram(builder, program1.rootIndex);
     const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toEqualType(listInt, builder);
     
-    const prog2 = _let("flags", typeApp(v("List"), [v("Bool")]), null);
-    const program2 = exprToProgram(prog2, builder);
+    const prog2 = b.let("flags", b.typeApp("List", ["Bool"]), null);
+    const program2 = b.program(prog2);
     const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toEqualType(listBool, builder);
@@ -1049,14 +1088,15 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     envSetType(env, "List", listScheme);
     envSetType(env, "Option", optionScheme);
     
-    const prog1 = _let("optList", typeApp(v("Option"), [typeApp(v("List"), [v("Int")])]), null);
-    const program1 = exprToProgram(prog1, builder);
+    const b = new TestBuilder(builder);
+    const prog1 = b.let("optList", b.typeApp("Option", [b.typeApp("List", ["Int"])]), null);
+    const program1 = b.program(prog1);
     const bytecode1 = lineariseProgram(builder, program1.rootIndex);
     const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toEqualType(optionListInt, builder);
     
-    const prog2 = _let("listOpt", typeApp(v("List"), [typeApp(v("Option"), [v("Int")])]), null);
-    const program2 = exprToProgram(prog2, builder);
+    const prog2 = b.let("listOpt", b.typeApp("List", [b.typeApp("Option", ["Int"])]), null);
+    const program2 = b.program(prog2);
     const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toEqualType(listOptionInt, builder);
@@ -1073,14 +1113,15 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     
     envSetType(env, "Pair", pairScheme);
     
-    const prog1 = _let("mixed", typeApp(v("Pair"), [v("Int"), v("Bool")]), null);
-    const program1 = exprToProgram(prog1, builder);
+    const b = new TestBuilder(builder);
+    const prog1 = b.let("mixed", b.typeApp("Pair", ["Int", "Bool"]), null);
+    const program1 = b.program(prog1);
     const bytecode1 = lineariseProgram(builder, program1.rootIndex);
     const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toEqualType(pairIntBool, builder);
     
-    const prog2 = _let("numbers", typeApp(v("Pair"), [v("Float"), v("Int")]), null);
-    const program2 = exprToProgram(prog2, builder);
+    const prog2 = b.let("numbers", b.typeApp("Pair", ["Float", "Int"]), null);
+    const program2 = b.program(prog2);
     const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toEqualType(pairFloatInt, builder);
@@ -1105,8 +1146,11 @@ describe("Type Annotation Resolution for Generic Structs", () => {
 
     console.log('env', env);
     
-    const prog = _let("complex", typeApp(v("Map"), [typeApp(v("List"), [v("Int")]), typeApp(v("Option"), [v("Bool")])]), null);
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const list = b.typeApp("List", ["Int"]);
+    const option = b.typeApp("Option", ["Bool"]);
+    const prog = b.let("complex", b.typeApp("Map", [list, option]), null);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     expect(result).toEqualType(complexType, builder);
@@ -1122,8 +1166,9 @@ describe("Type Annotation Resolution for Generic Structs", () => {
   //   const sortedListStruct = scheme(["T"], tstruct("SortedList", [{ name: "head", type: tvar("T") }]));
   //   envSetType(env, "SortedList", sortedListStruct);
     
-  //   const prog = _let("sorted", typeApp(v("SortedList"), [v("Int")]), null);
-  //   const program = exprToProgram(prog);
+  //   const b = new TestBuilder(builder);
+  //   const prog = b.let("sorted", b.typeApp("SortedList", ["Int"]), null);
+  //   const program = b.program(prog);
   //   const bytecode = lineariseProgram(program, program.rootIndex);
   //   const result = runExpectingResult(bytecode, env, program);
   //   expect(result).toEqualType(sortedListInt);
@@ -1146,12 +1191,13 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     const processFn = arrowN([listInt, optionBool], IntType);
     envSetVal(env, "process", processFn);
     
-    const prog = block(
-      _let("list", typeApp(v("List"), [v("Int")]), null),
-      _let("opt", typeApp(v("Option"), [v("Bool")]), null),
-      appN(v("process"), [v("list"), v("opt")])
+    const b = new TestBuilder(builder);
+    const prog = b.block(
+      b.let("list", b.typeApp("List", ["Int"]), null),
+      b.let("opt", b.typeApp("Option", ["Bool"]), null),
+      b.appN(b.var("process"), [b.var("list"), b.var("opt")])
     );
-    const program = exprToProgram(prog, builder);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     expect(result).toEqualType(IntType, builder);
@@ -1175,13 +1221,14 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     envSetVal(env, "createList", createListFn);
     envSetVal(env, "createOption", createOptionFn);
     
-    const prog = block(
-      _let("myList", typeApp(v("List"), [v("Int")]), app(v("createList"), int(42))),
-      _let("myOption", typeApp(v("Option"), [v("Int")]), app(v("createOption"), int(10))),
-      int(999)
+    const b = new TestBuilder(builder);
+    const prog = b.block(
+      b.let("myList", b.typeApp("List", ["Int"]), b.app(b.var("createList"), b.int(42))),
+      b.let("myOption", b.typeApp("Option", ["Int"]), b.app(b.var("createOption"), b.int(10))),
+      b.int(999)
     );
     
-    const program = exprToProgram(prog, builder);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     expect(result).toEqualType(IntType, builder);
@@ -1222,16 +1269,17 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     const pairScheme = builder.scheme("Pair", ["T", "U"], tstruct("Pair", [{ name: "first", type: tvar("T") }, { name: "second", type: tvar("U") }]));
     envSetType(env, "Pair", pairScheme);
     
-    const prog1 = _let("invalid", typeApp(v("Pair"), [v("Int")]), null); // Missing second type parameter
-    const program1 = exprToProgram(prog1, builder);
+    const b = new TestBuilder(builder);
+    const prog1 = b.let("invalid", b.typeApp("Pair", ["Int"]), null); // Missing second type parameter
+    const program1 = b.program(prog1);
     const bytecode1 = lineariseProgram(builder, program1.rootIndex);
     
     expect(() => {
       runExpectingResult(bytecode1, env, program1, builder);
     }).toThrow();
     
-    const prog2 = _let("invalid2", typeApp(v("Pair"), [v("Int"), v("Bool"), v("Float")]), null); // Too many type parameters
-    const program2 = exprToProgram(prog2, builder);
+    const prog2 = b.let("invalid2", b.typeApp("Pair", ["Int", "Bool", "Float"]), null); // Too many type parameters
+    const program2 = b.program(prog2);
     const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     
     expect(() => {
@@ -1243,8 +1291,9 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     const builder = new ProgramBuilder();
     const env: Env = new Map();
     
-    const prog = _let("undefined", typeApp(v("UndefinedStruct"), [v("Int")]), null);
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.let("undefined", b.typeApp("UndefinedStruct", ["Int"]), null);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     
     expect(() => {
@@ -1262,8 +1311,9 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     envSetType(env, "List", listScheme);
     
     // Int should be accepted where Float is expected due to widening
-    const prog = _let("numbers", typeApp(v("List"), [v("Float")]), null);
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.let("numbers", b.typeApp("List", ["Float"]), null);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     expect(result).toEqualType(listFloat, builder);
@@ -1285,12 +1335,13 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     const complexFn = arrow(IntType, optionListInt);
     envSetVal(env, "complexFn", complexFn);
     
-    const prog = block(
-      _let("result", typeApp(v("Option"), [typeApp(v("List"), [v("Int")])]), app(v("complexFn"), int(42))),
-      int(999)
+    const b = new TestBuilder(builder);
+    const prog = b.block(
+      b.let("result", b.typeApp("Option", [b.typeApp("List", ["Int"])]), b.app(b.var("complexFn"), b.int(42))),
+      b.int(999)
     );
     
-    const program = exprToProgram(prog, builder);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     expect(result).toEqualType(IntType, builder);
@@ -1327,8 +1378,9 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     envSetType(env, "Container", containerScheme);
     
     
-    const prog = _let("container", typeApp(v("Container"), [typeApp(v("Fn"), [v("Int"),v("Int")])]), null);
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.let("container", b.typeApp("Container", [b.typeApp("Fn", ["Int", "Int"])]), null);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     expect(result).toEqualType(containerFn, builder);
@@ -1351,20 +1403,21 @@ describe("Type Annotation Resolution for Generic Structs", () => {
     ]);
     envSetVal(env, "overloadedFn", overloadedFn);
     
-    const prog1 = block(
-      _let("list", typeApp(v("List"), [v("Int")]), null),
-      app(v("overloadedFn"), v("list"))
+    const b = new TestBuilder(builder);
+    const prog1 = b.block(
+      b.let("list", b.typeApp("List", ["Int"]), null),
+      b.app(b.var("overloadedFn"), b.var("list"))
     );
-    const program1 = exprToProgram(prog1, builder);
+    const program1 = b.program(prog1);
     const bytecode1 = lineariseProgram(builder, program1.rootIndex);
     const result1 = runExpectingResult(bytecode1, env, program1, builder);
     expect(result1).toBe(IntType);
     
-    const prog2 = block(
-      _let("list", typeApp(v("List"), [v("Float")]), null),
-      app(v("overloadedFn"), v("list"))
+    const prog2 = b.block(
+      b.let("list", b.typeApp("List", ["Float"]), null),
+      b.app(b.var("overloadedFn"), b.var("list"))
     );
-    const program2 = exprToProgram(prog2, builder);
+    const program2 = b.program(prog2);
     const bytecode2 = lineariseProgram(builder, program2.rootIndex);
     const result2 = runExpectingResult(bytecode2, env, program2, builder);
     expect(result2).toBe(FloatType);
@@ -1382,8 +1435,9 @@ describe("storeType Tests", () => {
 
   it("should store types for primitive literals", () => {
     const builder = new ProgramBuilder();
-    const prog = int(42);
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.int(42);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, new Map(), program, builder);
     
@@ -1394,8 +1448,9 @@ describe("storeType Tests", () => {
 
   it("should store types for boolean literals", () => {
     const builder = new ProgramBuilder();
-    const prog = bool(true);
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.bool(true);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, new Map(), program, builder);
     
@@ -1409,8 +1464,9 @@ describe("storeType Tests", () => {
     const env: Env = new Map();
     envSetVal(env, "x", IntType);
     
-    const prog = v("x");
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.var("x");
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1425,8 +1481,9 @@ describe("storeType Tests", () => {
     const addFn = arrow(IntType, arrow(IntType, IntType));
     envSetVal(env, "add", addFn);
     
-    const prog = app(app(v("add"), int(5)), int(3));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.app(b.app(b.var("add"), b.int(5)), b.int(3));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1444,8 +1501,9 @@ describe("storeType Tests", () => {
     envSetVal(env, "isPositive", isPositiveFn);
     
     // Create a complex expression: isPositive(add(5, 3))
-    const prog = app(v("isPositive"), app(app(v("add"), int(5)), int(3)));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.app(b.var("isPositive"), b.app(b.app(b.var("add"), b.int(5)), b.int(3)));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1474,8 +1532,9 @@ describe("storeType Tests", () => {
     // Create: if x > 0 then x else y
     // Note: This test needs to be adjusted since the current system doesn't support
     // boolean conditions properly. We'll test with a simpler conditional.
-    const prog = _if(bool(true), v("x"), v("y"));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.if(b.bool(true), b.var("x"), b.var("y"));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1490,8 +1549,9 @@ describe("storeType Tests", () => {
     
     // Create: fun f(x: Int): Int { x }
     // Note: Function declarations need special handling in the lineariser
-    const prog = lam("x", v("x"));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.lam("x", b.var("x"));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1509,8 +1569,9 @@ describe("storeType Tests", () => {
     envSetVal(env, "mul", mulFn);
     
     // Create: add(mul(2, 3), 4)
-    const prog = app(app(v("add"), app(app(v("mul"), int(2)), int(3))), int(4));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.app(b.app(b.var("add"), b.app(b.app(b.var("mul"), b.int(2)), b.int(3))), b.int(4));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1526,8 +1587,9 @@ describe("storeType Tests", () => {
     envSetVal(env, "y", IntType);
     
     // Create: { x; y }
-    const prog = block(v("x"), v("y"));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.block(b.var("x"), b.var("y"));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1542,8 +1604,9 @@ describe("storeType Tests", () => {
     envSetVal(env, "x", IntType);
     
     // Create: let y = x in y
-    const prog = _let("y", null, v("x"));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.let("y", null, b.var("x"));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1562,8 +1625,9 @@ describe("storeType Tests", () => {
     envSetVal(env, "f", overloadedFn);
     
     // Create: f(42)
-    const prog = app(v("f"), int(42));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.app(b.var("f"), b.int(42));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1578,8 +1642,9 @@ describe("storeType Tests", () => {
     const listScheme = builder.scheme("List", ["T"], tstruct("List", [{ name: "head", type: tvar("T") }]));
     envSetType(env, "List", listScheme);
     
-    const prog = _let("list", typeApp(v("List"), [v("Int")]), null);
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.let("list", b.typeApp("List", ["Int"]), null);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     
     const result = runExpectingResult(bytecode, env, program, builder);
@@ -1597,8 +1662,9 @@ describe("storeType Tests", () => {
     envSetVal(env, "isPositive", isPositiveFn);
     
     // Create a complex expression with multiple nodes
-    const prog = app(v("isPositive"), app(app(v("add"), int(5)), int(3)));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.app(b.var("isPositive"), b.app(b.app(b.var("add"), b.int(5)), b.int(3)));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1621,8 +1687,9 @@ describe("storeType Tests", () => {
     
     // Create: fun f(x: Int): Int { x }
     // Note: Function declarations need special handling
-    const prog = lam("x", v("x"));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.lam("x", b.var("x"));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1644,16 +1711,17 @@ describe("storeType Tests", () => {
     envSetVal(env, "isPositive", isPositiveFn);
     
     // Create: isPositive(add(mul(2, 3), mul(4, 5)))
-    const prog = app(
-      v("isPositive"), 
-      app(
-        app(v("add"), 
-          app(app(v("mul"), int(2)), int(3))
+    const b = new TestBuilder(builder);
+    const prog = b.app(
+      b.var("isPositive"), 
+      b.app(
+        b.app(b.var("add"), 
+          b.app(b.app(b.var("mul"), b.int(2)), b.int(3))
         ), 
-        app(app(v("mul"), int(4)), int(5))
+        b.app(b.app(b.var("mul"), b.int(4)), b.int(5))
       )
     );
-    const program = exprToProgram(prog, builder);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1681,15 +1749,16 @@ describe("storeType Tests", () => {
     envSetVal(env, "sub", subFn);
     
     // Create: add(mul(sub(10, 2), 3), mul(4, 5))
-    const prog = app(
-      app(v("add"), 
-        app(app(v("mul"), 
-          app(app(v("sub"), int(10)), int(2))
-        ), int(3))
+    const b = new TestBuilder(builder);
+    const prog = b.app(
+      b.app(b.var("add"), 
+        b.app(b.app(b.var("mul"), 
+          b.app(b.app(b.var("sub"), b.int(10)), b.int(2))
+        ), b.int(3))
       ), 
-      app(app(v("mul"), int(4)), int(5))
+      b.app(b.app(b.var("mul"), b.int(4)), b.int(5))
     );
-    const program = exprToProgram(prog, builder);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1721,13 +1790,14 @@ describe("storeType Tests", () => {
     envSetVal(env, "not", notFn);
     
     // Create: not(isPositive(add(5, 3)))
-    const prog = app(
-      v("not"), 
-      app(v("isPositive"), 
-        app(app(v("add"), int(5)), int(3))
+    const b = new TestBuilder(builder);
+    const prog = b.app(
+      b.var("not"), 
+      b.app(b.var("isPositive"), 
+        b.app(b.app(b.var("add"), b.int(5)), b.int(3))
       )
     );
-    const program = exprToProgram(prog, builder);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1760,8 +1830,9 @@ describe("storeType Tests", () => {
     envSetVal(env, "id", idScheme);
     
     // Create: id(42)
-    const prog = app(v("id"), int(42));
-    const program = exprToProgram(prog, builder);
+    const b = new TestBuilder(builder);
+    const prog = b.app(b.var("id"), b.int(42));
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     
     const result = runExpectingResult(bytecode, env, program, builder);
@@ -1795,11 +1866,12 @@ describe("storeType Tests", () => {
     
     // Create: map(List<Int>, fn)
     // TODO: This shouldn't be allowed
-    const prog = block(
-      _let("list", typeApp(v("List"), [v("Int")]), null),
-      app(v("map"), v("list"))
+    const b = new TestBuilder(builder);
+    const prog = b.block(
+      b.let("list", b.typeApp("List", ["Int"]), null),
+      b.app(b.var("map"), b.var("list"))
     );
-    const program = exprToProgram(prog, builder);
+    const program = b.program(prog);
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
     
@@ -1940,10 +2012,17 @@ describe("Type Constraints System", () => {
     envSetType(env, "Ord", new TraitType("Ord", 1));
 
     // Create a generic max function with trait bounds
-    const maxExpr = funDecl("max", ["T"], ["a", "b"], int(0), ["T", "T"], "T", [
-      ["T", v("Ord")]
-    ]);
-    const program = exprToProgram(maxExpr, builder);
+    const b = new TestBuilder(builder);
+    const maxExpr = b.complexFunDecl({
+      name: "max",
+      typeParams: ["T"],
+      params: ["a", "b"],
+      bodyIndex: b.int(0),
+      paramTypes: ["T", "T"],
+      returnType: "T",
+      traitBounds: [{ typeParam: "T", trait: "Ord" }]
+    });
+    const program = b.program(maxExpr);
 
     const bytecode = lineariseProgram(builder, program.rootIndex);
     // Find the scheme by function name
@@ -2006,11 +2085,20 @@ describe("Type Constraints System", () => {
     registerTraitImpl(builder, 3, IntType);
 
     // Create a generic function with multiple trait bounds
-    const mapExpr = funDecl("map", ["K", "V"], ["key", "value"], int(0), ["K", "V"], "Unit", [
-      ["K", v("Hash")],
-      ["K", v("Eq")]
-    ]);
-    const program = exprToProgram(mapExpr, builder);
+    const b = new TestBuilder(builder);
+    const mapExpr = b.complexFunDecl({
+      name: "map",
+      typeParams: ["K", "V"],
+      params: ["key", "value"],
+      bodyIndex: b.int(0),
+      paramTypes: ["K", "V"],
+      returnType: "Unit",
+      traitBounds: [
+        { typeParam: "K", trait: "Hash" },
+        { typeParam: "K", trait: "Eq" }
+      ]
+    });
+    const program = b.program(mapExpr);
 
     const bytecode = lineariseProgram(builder, program.rootIndex);
     const result = runExpectingResult(bytecode, env, program, builder);
@@ -2035,12 +2123,18 @@ describe("Type Constraints System", () => {
     registerTraitImpl(builder, 1, IntType);
 
     // Create a generic function with subtype bounds
-    const numericExpr = funDecl("numeric", ["T"], ["x"], int(0), ["T"], "T", [
-      ["T", v("Ord")]
-    ], [
-      ["T", v("Int")]
-    ]);
-    const program = exprToProgram(numericExpr, builder);
+    const b = new TestBuilder(builder);
+    const numericExpr = b.complexFunDecl({
+      name: "numeric",
+      typeParams: ["T"],
+      params: ["x"],
+      bodyIndex: b.int(0),
+      paramTypes: ["T"],
+      returnType: "T",
+      traitBounds: [{ typeParam: "T", trait: "Ord" }],
+      subtypeBounds: [{ typeParam: "T", subtype: "Int" }]
+    });
+    const program = b.program(numericExpr);
     
 
     // if (scheme) {
